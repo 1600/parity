@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -16,208 +16,280 @@
 
 //! Test implementation of miner service.
 
-use util::{Address, H256, Bytes, U256, FixedHash, Uint};
-use util::standard::*;
-use ethcore::error::{Error, ExecutionError};
-use ethcore::client::{BlockChainClient, Executed};
-use ethcore::block::{ClosedBlock, IsBlock};
-use ethcore::transaction::SignedTransaction;
-use ethcore::receipt::Receipt;
-use ethminer::{MinerService, MinerStatus, AccountDetails, TransactionImportResult};
+use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use bytes::Bytes;
+use ethcore::account_provider::SignError as AccountError;
+use ethcore::block::{Block, SealedBlock, IsBlock};
+use ethcore::client::{Nonce, PrepareOpenBlock, StateClient, EngineInfo};
+use ethcore::engines::EthEngine;
+use ethcore::error::Error;
+use ethcore::header::{BlockNumber, Header};
+use ethcore::ids::BlockId;
+use ethcore::miner::{self, MinerService, AuthoringParams};
+use ethcore::receipt::{Receipt, RichReceipt};
+use ethereum_types::{H256, U256, Address};
+use miner::pool::local_transactions::Status as LocalTransactionStatus;
+use miner::pool::{verifier, VerifiedTransaction, QueueStatus};
+use parking_lot::{RwLock, Mutex};
+use transaction::{self, UnverifiedTransaction, SignedTransaction, PendingTransaction};
+use txpool;
+use ethkey::Password;
 
 /// Test miner service.
 pub struct TestMinerService {
 	/// Imported transactions.
 	pub imported_transactions: Mutex<Vec<SignedTransaction>>,
-	/// Latest closed block.
-	pub latest_closed_block: Mutex<Option<ClosedBlock>>,
 	/// Pre-existed pending transactions
 	pub pending_transactions: Mutex<HashMap<H256, SignedTransaction>>,
+	/// Pre-existed local transactions
+	pub local_transactions: Mutex<BTreeMap<H256, LocalTransactionStatus>>,
 	/// Pre-existed pending receipts
 	pub pending_receipts: Mutex<BTreeMap<H256, Receipt>>,
-	/// Last nonces.
-	pub last_nonces: RwLock<HashMap<Address, U256>>,
+	/// Next nonces.
+	pub next_nonces: RwLock<HashMap<Address, U256>>,
+	/// Password held by Engine.
+	pub password: RwLock<Password>,
 
-	min_gas_price: RwLock<U256>,
-	gas_floor_target: RwLock<U256>,
-	author: RwLock<Address>,
-	extra_data: RwLock<Bytes>,
-	limit: RwLock<usize>,
+	authoring_params: RwLock<AuthoringParams>,
 }
 
 impl Default for TestMinerService {
 	fn default() -> TestMinerService {
 		TestMinerService {
 			imported_transactions: Mutex::new(Vec::new()),
-			latest_closed_block: Mutex::new(None),
 			pending_transactions: Mutex::new(HashMap::new()),
+			local_transactions: Mutex::new(BTreeMap::new()),
 			pending_receipts: Mutex::new(BTreeMap::new()),
-			last_nonces: RwLock::new(HashMap::new()),
-			min_gas_price: RwLock::new(U256::from(20_000_000)),
-			gas_floor_target: RwLock::new(U256::from(12345)),
-			author: RwLock::new(Address::zero()),
-			extra_data: RwLock::new(vec![1, 2, 3, 4]),
-			limit: RwLock::new(1024),
+			next_nonces: RwLock::new(HashMap::new()),
+			password: RwLock::new("".into()),
+			authoring_params: RwLock::new(AuthoringParams {
+				author: Address::zero(),
+				gas_range_target: (12345.into(), 54321.into()),
+				extra_data: vec![1, 2, 3, 4],
+			}),
 		}
 	}
 }
 
-impl MinerService for TestMinerService {
+impl TestMinerService {
+	/// Increments nonce for given address.
+	pub fn increment_nonce(&self, address: &Address) {
+		let mut next_nonces = self.next_nonces.write();
+		let nonce = next_nonces.entry(*address).or_insert_with(|| 0.into());
+		*nonce = *nonce + 1.into();
+	}
+}
 
-	/// Returns miner's status.
-	fn status(&self) -> MinerStatus {
-		MinerStatus {
-			transactions_in_pending_queue: 0,
-			transactions_in_future_queue: 0,
-			transactions_in_pending_block: 1
-		}
+impl StateClient for TestMinerService {
+	// State will not be used by test client anyway, since all methods that accept state are mocked
+	type State = ();
+
+	fn latest_state(&self) -> Self::State {
+		()
 	}
 
-	fn set_author(&self, author: Address) {
-		*self.author.write().unwrap() = author;
+	fn state_at(&self, _id: BlockId) -> Option<Self::State> {
+		Some(())
+	}
+}
+
+impl EngineInfo for TestMinerService {
+	fn engine(&self) -> &EthEngine {
+		unimplemented!()
+	}
+}
+
+impl MinerService for TestMinerService {
+	type State = ();
+
+	fn pending_state(&self, _latest_block_number: BlockNumber) -> Option<Self::State> {
+		None
+	}
+
+	fn pending_block_header(&self, _latest_block_number: BlockNumber) -> Option<Header> {
+		None
+	}
+
+	fn pending_block(&self, _latest_block_number: BlockNumber) -> Option<Block> {
+		None
+	}
+
+	fn authoring_params(&self) -> AuthoringParams {
+		self.authoring_params.read().clone()
+	}
+
+	fn set_author(&self, author: Address, password: Option<Password>) -> Result<(), AccountError> {
+		self.authoring_params.write().author = author;
+		if let Some(password) = password {
+			*self.password.write() = password;
+		}
+		Ok(())
 	}
 
 	fn set_extra_data(&self, extra_data: Bytes) {
-		*self.extra_data.write().unwrap() = extra_data;
+		self.authoring_params.write().extra_data = extra_data;
 	}
 
-	/// Set the gas limit we wish to target when sealing a new block.
-	fn set_gas_floor_target(&self, target: U256) {
-		*self.gas_floor_target.write().unwrap() = target;
-	}
-
-	fn set_minimal_gas_price(&self, min_gas_price: U256) {
-		*self.min_gas_price.write().unwrap() = min_gas_price;
-	}
-
-	fn set_transactions_limit(&self, limit: usize) {
-		*self.limit.write().unwrap() = limit;
-	}
-
-	fn transactions_limit(&self) -> usize {
-		*self.limit.read().unwrap()
-	}
-
-	fn author(&self) -> Address {
-		*self.author.read().unwrap()
-	}
-
-	fn minimal_gas_price(&self) -> U256 {
-		*self.min_gas_price.read().unwrap()
-	}
-
-	fn extra_data(&self) -> Bytes {
-		self.extra_data.read().unwrap().clone()
-	}
-
-	fn gas_floor_target(&self) -> U256 {
-		*self.gas_floor_target.read().unwrap()
+	fn set_gas_range_target(&self, target: (U256, U256)) {
+		self.authoring_params.write().gas_range_target = target;
 	}
 
 	/// Imports transactions to transaction queue.
-	fn import_transactions<T>(&self, transactions: Vec<SignedTransaction>, fetch_account: T) ->
-		Vec<Result<TransactionImportResult, Error>>
-		where T: Fn(&Address) -> AccountDetails {
+	fn import_external_transactions<C: Nonce + Sync>(&self, chain: &C, transactions: Vec<UnverifiedTransaction>)
+		-> Vec<Result<(), transaction::Error>>
+	{
 		// lets assume that all txs are valid
-		self.imported_transactions.lock().unwrap().extend_from_slice(&transactions);
+		let transactions: Vec<_> = transactions.into_iter().map(|tx| SignedTransaction::new(tx).unwrap()).collect();
+		self.imported_transactions.lock().extend_from_slice(&transactions);
 
-		for sender in transactions.iter().filter_map(|t| t.sender().ok()) {
-			let nonce = self.last_nonce(&sender).unwrap_or(fetch_account(&sender).nonce);
-			self.last_nonces.write().unwrap().insert(sender, nonce + U256::from(1));
+		for sender in transactions.iter().map(|tx| tx.sender()) {
+			let nonce = self.next_nonce(chain, &sender);
+			self.next_nonces.write().insert(sender, nonce);
 		}
+
 		transactions
 			.iter()
-			.map(|_| Ok(TransactionImportResult::Current))
+			.map(|_| Ok(()))
 			.collect()
 	}
 
 	/// Imports transactions to transaction queue.
-	fn import_own_transaction<T>(&self, chain: &BlockChainClient, transaction: SignedTransaction, _fetch_account: T) ->
-		Result<TransactionImportResult, Error>
-		where T: Fn(&Address) -> AccountDetails {
-
-		// keep the pending nonces up to date
-		if let Ok(ref sender) = transaction.sender() {
-			let nonce = self.last_nonce(sender).unwrap_or(chain.latest_nonce(sender));
-			self.last_nonces.write().unwrap().insert(sender.clone(), nonce + U256::from(1));
-		}
-
-		// lets assume that all txs are valid
-		self.imported_transactions.lock().unwrap().push(transaction);
-
-		Ok(TransactionImportResult::Current)
-	}
-
-	/// Returns hashes of transactions currently in pending
-	fn pending_transactions_hashes(&self) -> Vec<H256> {
-		vec![]
-	}
-
-	/// Removes all transactions from the queue and restart mining operation.
-	fn clear_and_reset(&self, _chain: &BlockChainClient) {
+	fn import_own_transaction<C: Nonce + Sync>(&self, _chain: &C, _pending: PendingTransaction)
+		-> Result<(), transaction::Error> {
+		// this function is no longer called directly from RPC
 		unimplemented!();
 	}
 
+	/// Imports transactions to queue - treats as local based on trusted flag, config, and tx source
+	fn import_claimed_local_transaction<C: Nonce + Sync>(&self, chain: &C, pending: PendingTransaction, _trusted: bool)
+		-> Result<(), transaction::Error> {
+
+		// keep the pending nonces up to date
+		let sender = pending.transaction.sender();
+		let nonce = self.next_nonce(chain, &sender);
+		self.next_nonces.write().insert(sender, nonce);
+
+		// lets assume that all txs are valid
+		self.imported_transactions.lock().push(pending.transaction);
+
+		Ok(())
+	}
+
 	/// Called when blocks are imported to chain, updates transactions queue.
-	fn chain_new_blocks(&self, _chain: &BlockChainClient, _imported: &[H256], _invalid: &[H256], _enacted: &[H256], _retracted: &[H256]) {
+	fn chain_new_blocks<C>(&self, _chain: &C, _imported: &[H256], _invalid: &[H256], _enacted: &[H256], _retracted: &[H256], _is_internal: bool) {
 		unimplemented!();
 	}
 
 	/// New chain head event. Restart mining operation.
-	fn update_sealing(&self, _chain: &BlockChainClient) {
+	fn update_sealing<C>(&self, _chain: &C) {
 		unimplemented!();
 	}
 
-	fn map_sealing_work<F, T>(&self, _chain: &BlockChainClient, _f: F) -> Option<T> where F: FnOnce(&ClosedBlock) -> T {
-		unimplemented!();
+	fn work_package<C: PrepareOpenBlock>(&self, chain: &C) -> Option<(H256, BlockNumber, u64, U256)> {
+		let params = self.authoring_params();
+		let open_block = chain.prepare_open_block(params.author, params.gas_range_target, params.extra_data).unwrap();
+		let closed = open_block.close().unwrap();
+		let header = closed.header();
+
+		Some((header.hash(), header.number(), header.timestamp(), *header.difficulty()))
 	}
 
-	fn transaction(&self, hash: &H256) -> Option<SignedTransaction> {
-		self.pending_transactions.lock().unwrap().get(hash).cloned()
+	fn transaction(&self, hash: &H256) -> Option<Arc<VerifiedTransaction>> {
+		self.pending_transactions.lock().get(hash).cloned().map(|tx| {
+			Arc::new(VerifiedTransaction::from_pending_block_transaction(tx))
+		})
 	}
 
-	fn all_transactions(&self) -> Vec<SignedTransaction> {
-		self.pending_transactions.lock().unwrap().values().cloned().collect()
+	fn remove_transaction(&self, hash: &H256) -> Option<Arc<VerifiedTransaction>> {
+		self.pending_transactions.lock().remove(hash).map(|tx| {
+			Arc::new(VerifiedTransaction::from_pending_block_transaction(tx))
+		})
 	}
 
-	fn pending_transactions(&self) -> Vec<SignedTransaction> {
-		self.pending_transactions.lock().unwrap().values().cloned().collect()
+	fn pending_transactions(&self, _best_block: BlockNumber) -> Option<Vec<SignedTransaction>> {
+		Some(self.pending_transactions.lock().values().cloned().collect())
 	}
 
-	fn pending_receipts(&self) -> BTreeMap<H256, Receipt> {
-		self.pending_receipts.lock().unwrap().clone()
+	fn local_transactions(&self) -> BTreeMap<H256, LocalTransactionStatus> {
+		self.local_transactions.lock().iter().map(|(hash, stats)| (*hash, stats.clone())).collect()
 	}
 
-	fn last_nonce(&self, address: &Address) -> Option<U256> {
-		self.last_nonces.read().unwrap().get(address).cloned()
+	fn ready_transactions<C>(&self, _chain: &C, _max_len: usize, _ordering: miner::PendingOrdering) -> Vec<Arc<VerifiedTransaction>> {
+		self.queued_transactions()
+	}
+
+	fn pending_transaction_hashes<C>(&self, _chain: &C) -> BTreeSet<H256> {
+		self.queued_transactions().into_iter().map(|tx| tx.signed().hash()).collect()
+	}
+
+	fn queued_transactions(&self) -> Vec<Arc<VerifiedTransaction>> {
+		self.pending_transactions.lock().values().cloned().map(|tx| {
+			Arc::new(VerifiedTransaction::from_pending_block_transaction(tx))
+		}).collect()
+	}
+
+	fn pending_receipt(&self, _best_block: BlockNumber, hash: &H256) -> Option<RichReceipt> {
+		// Not much point implementing this since the logic is complex and the only thing it relies on is pending_receipts, which is already tested.
+		self.pending_receipts(0).unwrap().get(hash).map(|r|
+			RichReceipt {
+				transaction_hash: Default::default(),
+				transaction_index: Default::default(),
+				cumulative_gas_used: r.gas_used.clone(),
+				gas_used: r.gas_used.clone(),
+				contract_address: None,
+				logs: r.logs.clone(),
+				log_bloom: r.log_bloom,
+				outcome: r.outcome.clone(),
+			}
+		)
+	}
+
+	fn pending_receipts(&self, _best_block: BlockNumber) -> Option<BTreeMap<H256, Receipt>> {
+		Some(self.pending_receipts.lock().clone())
+	}
+
+	fn next_nonce<C: Nonce + Sync>(&self, _chain: &C, address: &Address) -> U256 {
+		self.next_nonces.read().get(address).cloned().unwrap_or_default()
+	}
+
+	fn is_currently_sealing(&self) -> bool {
+		false
+	}
+
+	fn queue_status(&self) -> QueueStatus {
+		QueueStatus {
+			options: verifier::Options {
+				minimal_gas_price: 0x1312d00.into(),
+				block_gas_limit: 5_000_000.into(),
+				tx_gas_limit: 5_000_000.into(),
+				no_early_reject: false,
+			},
+			status: txpool::LightStatus {
+				mem_usage: 1_000,
+				transaction_count: 52,
+				senders: 1,
+			},
+			limits: txpool::Options {
+				max_count: 1_024,
+				max_per_sender: 16,
+				max_mem_usage: 5_000,
+			},
+		}
 	}
 
 	/// Submit `seal` as a valid solution for the header of `pow_hash`.
 	/// Will check the seal, but not actually insert the block into the chain.
-	fn submit_seal(&self, _chain: &BlockChainClient, _pow_hash: H256, _seal: Vec<Bytes>) -> Result<(), Error> {
+	fn submit_seal(&self, _pow_hash: H256, _seal: Vec<Bytes>) -> Result<SealedBlock, Error> {
 		unimplemented!();
 	}
 
-	fn balance(&self, _chain: &BlockChainClient, address: &Address) -> U256 {
-		self.latest_closed_block.lock().unwrap().as_ref().map_or_else(U256::zero, |b| b.block().fields().state.balance(address).clone())
+	fn sensible_gas_price(&self) -> U256 {
+		20_000_000_000u64.into()
 	}
 
-	fn call(&self, _chain: &BlockChainClient, _t: &SignedTransaction) -> Result<Executed, ExecutionError> {
-		unimplemented!();
+	fn sensible_gas_limit(&self) -> U256 {
+		0x5208.into()
 	}
-
-	fn storage_at(&self, _chain: &BlockChainClient, address: &Address, position: &H256) -> H256 {
-		self.latest_closed_block.lock().unwrap().as_ref().map_or_else(H256::default, |b| b.block().fields().state.storage_at(address, position).clone())
-	}
-
-	fn nonce(&self, _chain: &BlockChainClient, address: &Address) -> U256 {
-		// we assume all transactions are in a pending block, ignoring the
-		// reality of gas limits.
-		self.last_nonce(address).unwrap_or(U256::zero())
-	}
-
-	fn code(&self, _chain: &BlockChainClient, address: &Address) -> Option<Bytes> {
-		self.latest_closed_block.lock().unwrap().as_ref().map_or(None, |b| b.block().fields().state.code(address).clone())
-	}
-
 }

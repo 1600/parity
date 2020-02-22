@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,14 +14,48 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-pub mod verification;
-pub mod verifier;
+//! Block verification utilities.
+
+mod verification;
+mod verifier;
+pub mod queue;
 mod canon_verifier;
-#[cfg(test)]
 mod noop_verifier;
 
 pub use self::verification::*;
 pub use self::verifier::Verifier;
 pub use self::canon_verifier::CanonVerifier;
-#[cfg(test)]
 pub use self::noop_verifier::NoopVerifier;
+pub use self::queue::{BlockQueue, Config as QueueConfig, VerificationQueue, QueueInfo};
+
+use client::{BlockInfo, CallContract};
+
+/// Verifier type.
+#[derive(Debug, PartialEq, Clone)]
+pub enum VerifierType {
+	/// Verifies block normally.
+	Canon,
+	/// Verifies block normallly, but skips seal verification.
+	CanonNoSeal,
+	/// Does not verify block at all.
+	/// Used in tests.
+	Noop,
+}
+
+/// Create a new verifier based on type.
+pub fn new<C: BlockInfo + CallContract>(v: VerifierType) -> Box<Verifier<C>> {
+	match v {
+		VerifierType::Canon | VerifierType::CanonNoSeal => Box::new(CanonVerifier),
+		VerifierType::Noop => Box::new(NoopVerifier),
+	}
+}
+
+impl VerifierType {
+	/// Check if seal verification is enabled for this verifier type.
+	pub fn verifying_seal(&self) -> bool {
+		match *self {
+			VerifierType::Canon => true,
+			VerifierType::Noop | VerifierType::CanonNoSeal => false,
+		}
+	}
+}

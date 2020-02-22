@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -16,7 +16,7 @@
 
 //! RPC generic methods implementation.
 use std::collections::BTreeMap;
-use jsonrpc_core::*;
+use jsonrpc_core::Result;
 use v1::traits::Rpc;
 
 /// RPC generic methods implementation.
@@ -39,24 +39,26 @@ impl RpcClient {
 }
 
 impl Rpc for RpcClient {
-	fn rpc_modules(&self, _: Params) -> Result<Value, Error> {
+	fn rpc_modules(&self) -> Result<BTreeMap<String, String>> {
 		let modules = self.modules.iter()
 			.fold(BTreeMap::new(), |mut map, (k, v)| {
-				map.insert(k.to_owned(), Value::String(v.to_owned()));
+				map.insert(k.to_owned(), v.to_owned());
 				map
 			});
-		Ok(Value::Object(modules))
+
+		Ok(modules)
 	}
 
-	fn modules(&self, _: Params) -> Result<Value, Error> {
+	fn modules(&self) -> Result<BTreeMap<String, String>> {
 		let modules = self.modules.iter()
 			.filter(|&(k, _v)| {
 				self.valid_apis.contains(k)
 			})
 			.fold(BTreeMap::new(), |mut map, (k, v)| {
-				map.insert(k.to_owned(), Value::String(v.to_owned()));
+				map.insert(k.to_owned(), v.to_owned());
 				map
 			});
-		Ok(Value::Object(modules))
+
+		Ok(modules)
 	}
 }

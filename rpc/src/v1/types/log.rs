@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,15 +14,14 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use util::numbers::*;
 use ethcore::log_entry::{LocalizedLogEntry, LogEntry};
-use v1::types::Bytes;
+use v1::types::{Bytes, H160, H256, U256};
 
 /// Log
 #[derive(Debug, Serialize, PartialEq, Eq, Hash, Clone)]
 pub struct Log {
-	/// Address
-	pub address: Address,
+	/// H160
+	pub address: H160,
 	/// Topics
 	pub topics: Vec<H256>,
 	/// Data
@@ -39,26 +38,34 @@ pub struct Log {
 	/// Transaction Index
 	#[serde(rename="transactionIndex")]
 	pub transaction_index: Option<U256>,
-	/// Log Index
+	/// Log Index in Block
 	#[serde(rename="logIndex")]
 	pub log_index: Option<U256>,
+	/// Log Index in Transaction
+	#[serde(rename="transactionLogIndex")]
+	pub transaction_log_index: Option<U256>,
 	/// Log Type
 	#[serde(rename="type")]
 	pub log_type: String,
+	/// Whether Log Type is Removed (Geth Compatibility Field)
+	#[serde(default)]
+	pub removed: bool,
 }
 
 impl From<LocalizedLogEntry> for Log {
 	fn from(e: LocalizedLogEntry) -> Log {
 		Log {
-			address: e.entry.address,
-			topics: e.entry.topics,
-			data: Bytes::new(e.entry.data),
-			block_hash: Some(e.block_hash),
-			block_number: Some(From::from(e.block_number)),
-			transaction_hash: Some(e.transaction_hash),
-			transaction_index: Some(From::from(e.transaction_index)),
-			log_index: Some(From::from(e.log_index)),
+			address: e.entry.address.into(),
+			topics: e.entry.topics.into_iter().map(Into::into).collect(),
+			data: e.entry.data.into(),
+			block_hash: Some(e.block_hash.into()),
+			block_number: Some(e.block_number.into()),
+			transaction_hash: Some(e.transaction_hash.into()),
+			transaction_index: Some(e.transaction_index.into()),
+			log_index: Some(e.log_index.into()),
+			transaction_log_index: Some(e.transaction_log_index.into()),
 			log_type: "mined".to_owned(),
+			removed: false,
 		}
 	}
 }
@@ -66,15 +73,17 @@ impl From<LocalizedLogEntry> for Log {
 impl From<LogEntry> for Log {
 	fn from(e: LogEntry) -> Log {
 		Log {
-			address: e.address,
-			topics: e.topics,
-			data: Bytes::new(e.data),
+			address: e.address.into(),
+			topics: e.topics.into_iter().map(Into::into).collect(),
+			data: e.data.into(),
 			block_hash: None,
 			block_number: None,
 			transaction_hash: None,
 			transaction_index: None,
 			log_index: None,
+			transaction_log_index: None,
 			log_type: "pending".to_owned(),
+			removed: false,
 		}
 	}
 }
@@ -83,26 +92,27 @@ impl From<LogEntry> for Log {
 mod tests {
 	use serde_json;
 	use std::str::FromStr;
-	use util::numbers::*;
-	use v1::types::{Bytes, Log};
+	use v1::types::{Log, H160, H256, U256};
 
 	#[test]
 	fn log_serialization() {
-		let s = r#"{"address":"0x33990122638b9132ca29c723bdf037f1a891a70c","topics":["0xa6697e974e6a320f454390be03f74955e8978f1a6971ea6730542e37b66179bc","0x4861736852656700000000000000000000000000000000000000000000000000"],"data":"0x","blockHash":"0xed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5","blockNumber":"0x04510c","transactionHash":"0x0000000000000000000000000000000000000000000000000000000000000000","transactionIndex":"0x00","logIndex":"0x01","type":"mined"}"#;
+		let s = r#"{"address":"0x33990122638b9132ca29c723bdf037f1a891a70c","topics":["0xa6697e974e6a320f454390be03f74955e8978f1a6971ea6730542e37b66179bc","0x4861736852656700000000000000000000000000000000000000000000000000"],"data":"0x","blockHash":"0xed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5","blockNumber":"0x4510c","transactionHash":"0x0000000000000000000000000000000000000000000000000000000000000000","transactionIndex":"0x0","logIndex":"0x1","transactionLogIndex":"0x1","type":"mined","removed":false}"#;
 
 		let log = Log {
-			address: Address::from_str("33990122638b9132ca29c723bdf037f1a891a70c").unwrap(),
+			address: H160::from_str("33990122638b9132ca29c723bdf037f1a891a70c").unwrap(),
 			topics: vec![
 				H256::from_str("a6697e974e6a320f454390be03f74955e8978f1a6971ea6730542e37b66179bc").unwrap(),
-				H256::from_str("4861736852656700000000000000000000000000000000000000000000000000").unwrap()
+				H256::from_str("4861736852656700000000000000000000000000000000000000000000000000").unwrap(),
 			],
-			data: Bytes::new(vec![]),
+			data: vec![].into(),
 			block_hash: Some(H256::from_str("ed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5").unwrap()),
 			block_number: Some(U256::from(0x4510c)),
-			transaction_hash: Some(H256::new()),
-			transaction_index: Some(U256::zero()),
-			log_index: Some(U256::one()),
+			transaction_hash: Some(H256::default()),
+			transaction_index: Some(U256::default()),
+			transaction_log_index: Some(1.into()),
+			log_index: Some(U256::from(1)),
 			log_type: "mined".to_owned(),
+			removed: false,
 		};
 
 		let serialized = serde_json::to_string(&log).unwrap();

@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,16 +14,31 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use util::numbers::{U256,H256};
-use header::BlockNumber;
+use ethereum_types::{H256, U256};
 
-/// Best block info.
-#[derive(Default)]
+use encoded;
+use header::{Header, BlockNumber};
+
+/// Contains information on a best block that is specific to the consensus engine.
+///
+/// For GHOST fork-choice rule it would typically describe the block with highest
+/// combined difficulty (usually the block with the highest block number).
+///
+/// Sometimes refered as 'latest block'.
 pub struct BestBlock {
+	/// Best block decoded header.
+	pub header: Header,
+	/// Best block uncompressed bytes.
+	pub block: encoded::Block,
+	/// Best block total difficulty.
+	pub total_difficulty: U256,
+}
+
+/// Best ancient block info. If the blockchain has a gap this keeps track of where it starts.
+#[derive(Default)]
+pub struct BestAncientBlock {
 	/// Best block hash.
 	pub hash: H256,
 	/// Best block number.
 	pub number: BlockNumber,
-	/// Best block total difficulty.
-	pub total_difficulty: U256
 }

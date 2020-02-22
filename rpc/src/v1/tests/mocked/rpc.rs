@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -18,7 +18,6 @@ use std::collections::BTreeMap;
 use jsonrpc_core::IoHandler;
 use v1::{Rpc, RpcClient};
 
-
 fn rpc_client() -> RpcClient {
 	let mut modules = BTreeMap::new();
 	modules.insert("rpc".to_owned(), "1.0".to_owned());
@@ -30,23 +29,23 @@ fn rpc_client() -> RpcClient {
 #[test]
 fn modules() {
 	let rpc = rpc_client().to_delegate();
-	let io = IoHandler::new();
-	io.add_delegate(rpc);
+	let mut io = IoHandler::new();
+	io.extend_with(rpc);
 
 	let request = r#"{"jsonrpc": "2.0", "method": "modules", "params": [], "id": 1}"#;
 	let response = r#"{"jsonrpc":"2.0","result":{"rpc":"1.0","web3":"1.0"},"id":1}"#;
 
-	assert_eq!(io.handle_request(request), Some(response.to_owned()));
+	assert_eq!(io.handle_request_sync(request), Some(response.to_owned()));
 }
 
 #[test]
 fn rpc_modules() {
 	let rpc = rpc_client().to_delegate();
-	let io = IoHandler::new();
-	io.add_delegate(rpc);
+	let mut io = IoHandler::new();
+	io.extend_with(rpc);
 
 	let request = r#"{"jsonrpc": "2.0", "method": "rpc_modules", "params": [], "id": 1}"#;
 	let response = r#"{"jsonrpc":"2.0","result":{"ethcore":"1.0","rpc":"1.0","web3":"1.0"},"id":1}"#;
 
-	assert_eq!(io.handle_request(request), Some(response.to_owned()));
+	assert_eq!(io.handle_request_sync(request), Some(response.to_owned()));
 }

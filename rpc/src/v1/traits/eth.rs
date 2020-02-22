@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -15,196 +15,194 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Eth rpc interface.
-use std::sync::Arc;
-use jsonrpc_core::*;
+use jsonrpc_core::{Result, BoxFuture};
+use jsonrpc_macros::Trailing;
 
-/// Eth rpc interface.
-pub trait Eth: Sized + Send + Sync + 'static {
-	/// Returns protocol version.
-	fn protocol_version(&self, _: Params) -> Result<Value, Error>;
+use v1::types::{RichBlock, BlockNumber, Bytes, CallRequest, Filter, FilterChanges, Index};
+use v1::types::{Log, Receipt, SyncStatus, Transaction, Work};
+use v1::types::{H64, H160, H256, U256};
 
-	/// Returns an object with data about the sync status or false. (wtf?)
-	fn syncing(&self, _: Params) -> Result<Value, Error>;
+build_rpc_trait! {
+	/// Eth rpc interface.
+	pub trait Eth {
+		type Metadata;
 
-	/// Returns the number of hashes per second that the node is mining with.
-	fn hashrate(&self, _: Params) -> Result<Value, Error>;
+		/// Returns protocol version encoded as a string (quotes are necessary).
+		#[rpc(name = "eth_protocolVersion")]
+		fn protocol_version(&self) -> Result<String>;
 
-	/// Returns block author.
-	fn author(&self, _: Params) -> Result<Value, Error>;
+		/// Returns an object with data about the sync status or false. (wtf?)
+		#[rpc(name = "eth_syncing")]
+		fn syncing(&self) -> Result<SyncStatus>;
 
-	/// Returns true if client is actively mining new blocks.
-	fn is_mining(&self, _: Params) -> Result<Value, Error>;
+		/// Returns the number of hashes per second that the node is mining with.
+		#[rpc(name = "eth_hashrate")]
+		fn hashrate(&self) -> Result<U256>;
 
-	/// Returns current gas_price.
-	fn gas_price(&self, _: Params) -> Result<Value, Error>;
+		/// Returns block author.
+		#[rpc(name = "eth_coinbase")]
+		fn author(&self) -> Result<H160>;
 
-	/// Returns accounts list.
-	fn accounts(&self, _: Params) -> Result<Value, Error>;
+		/// Returns true if client is actively mining new blocks.
+		#[rpc(name = "eth_mining")]
+		fn is_mining(&self) -> Result<bool>;
 
-	/// Returns highest block number.
-	fn block_number(&self, _: Params) -> Result<Value, Error>;
+		/// Returns current gas_price.
+		#[rpc(name = "eth_gasPrice")]
+		fn gas_price(&self) -> Result<U256>;
 
-	/// Returns balance of the given account.
-	fn balance(&self, _: Params) -> Result<Value, Error>;
+		/// Returns accounts list.
+		#[rpc(name = "eth_accounts")]
+		fn accounts(&self) -> Result<Vec<H160>>;
 
-	/// Returns content of the storage at given address.
-	fn storage_at(&self, _: Params) -> Result<Value, Error>;
+		/// Returns highest block number.
+		#[rpc(name = "eth_blockNumber")]
+		fn block_number(&self) -> Result<U256>;
 
-	/// Returns block with given hash.
-	fn block_by_hash(&self, _: Params) -> Result<Value, Error>;
+		/// Returns balance of the given account.
+		#[rpc(name = "eth_getBalance")]
+		fn balance(&self, H160, Trailing<BlockNumber>) -> BoxFuture<U256>;
 
-	/// Returns block with given number.
-	fn block_by_number(&self, _: Params) -> Result<Value, Error>;
+		/// Returns content of the storage at given address.
+		#[rpc(name = "eth_getStorageAt")]
+		fn storage_at(&self, H160, U256, Trailing<BlockNumber>) -> BoxFuture<H256>;
 
-	/// Returns the number of transactions sent from given address at given time (block number).
-	fn transaction_count(&self, _: Params) -> Result<Value, Error>;
+		/// Returns block with given hash.
+		#[rpc(name = "eth_getBlockByHash")]
+		fn block_by_hash(&self, H256, bool) -> BoxFuture<Option<RichBlock>>;
 
-	/// Returns the number of transactions in a block with given hash.
-	fn block_transaction_count_by_hash(&self, _: Params) -> Result<Value, Error>;
+		/// Returns block with given number.
+		#[rpc(name = "eth_getBlockByNumber")]
+		fn block_by_number(&self, BlockNumber, bool) -> BoxFuture<Option<RichBlock>>;
 
-	/// Returns the number of transactions in a block with given block number.
-	fn block_transaction_count_by_number(&self, _: Params) -> Result<Value, Error>;
+		/// Returns the number of transactions sent from given address at given time (block number).
+		#[rpc(name = "eth_getTransactionCount")]
+		fn transaction_count(&self, H160, Trailing<BlockNumber>) -> BoxFuture<U256>;
 
-	/// Returns the number of uncles in a block with given hash.
-	fn block_uncles_count_by_hash(&self, _: Params) -> Result<Value, Error>;
+		/// Returns the number of transactions in a block with given hash.
+		#[rpc(name = "eth_getBlockTransactionCountByHash")]
+		fn block_transaction_count_by_hash(&self, H256) -> BoxFuture<Option<U256>>;
 
-	/// Returns the number of uncles in a block with given block number.
-	fn block_uncles_count_by_number(&self, _: Params) -> Result<Value, Error>;
+		/// Returns the number of transactions in a block with given block number.
+		#[rpc(name = "eth_getBlockTransactionCountByNumber")]
+		fn block_transaction_count_by_number(&self, BlockNumber) -> BoxFuture<Option<U256>>;
 
-	/// Returns the code at given address at given time (block number).
-	fn code_at(&self, _: Params) -> Result<Value, Error>;
+		/// Returns the number of uncles in a block with given hash.
+		#[rpc(name = "eth_getUncleCountByBlockHash")]
+		fn block_uncles_count_by_hash(&self, H256) -> BoxFuture<Option<U256>>;
 
-	/// Signs the data with given address signature.
-	fn sign(&self, _: Params) -> Result<Value, Error>;
+		/// Returns the number of uncles in a block with given block number.
+		#[rpc(name = "eth_getUncleCountByBlockNumber")]
+		fn block_uncles_count_by_number(&self, BlockNumber) -> BoxFuture<Option<U256>>;
 
-	/// Sends transaction.
-	fn send_transaction(&self, _: Params) -> Result<Value, Error>;
+		/// Returns the code at given address at given time (block number).
+		#[rpc(name = "eth_getCode")]
+		fn code_at(&self, H160, Trailing<BlockNumber>) -> BoxFuture<Bytes>;
 
-	/// Sends signed transaction.
-	fn send_raw_transaction(&self, _: Params) -> Result<Value, Error>;
+		/// Sends signed transaction, returning its hash.
+		#[rpc(name = "eth_sendRawTransaction")]
+		fn send_raw_transaction(&self, Bytes) -> Result<H256>;
 
-	/// Call contract.
-	fn call(&self, _: Params) -> Result<Value, Error>;
+		/// @alias of `eth_sendRawTransaction`.
+		#[rpc(name = "eth_submitTransaction")]
+		fn submit_transaction(&self, Bytes) -> Result<H256>;
 
-	/// Estimate gas needed for execution of given contract.
-	fn estimate_gas(&self, _: Params) -> Result<Value, Error>;
+		/// Call contract, returning the output data.
+		#[rpc(name = "eth_call")]
+		fn call(&self, CallRequest, Trailing<BlockNumber>) -> BoxFuture<Bytes>;
 
-	/// Get transaction by it's hash.
-	fn transaction_by_hash(&self, _: Params) -> Result<Value, Error>;
+		/// Estimate gas needed for execution of given contract.
+		#[rpc(name = "eth_estimateGas")]
+		fn estimate_gas(&self, CallRequest, Trailing<BlockNumber>) -> BoxFuture<U256>;
 
-	/// Returns transaction at given block hash and index.
-	fn transaction_by_block_hash_and_index(&self, _: Params) -> Result<Value, Error>;
+		/// Get transaction by its hash.
+		#[rpc(name = "eth_getTransactionByHash")]
+		fn transaction_by_hash(&self, H256) -> BoxFuture<Option<Transaction>>;
 
-	/// Returns transaction by given block number and index.
-	fn transaction_by_block_number_and_index(&self, _: Params) -> Result<Value, Error>;
+		/// Returns transaction at given block hash and index.
+		#[rpc(name = "eth_getTransactionByBlockHashAndIndex")]
+		fn transaction_by_block_hash_and_index(&self, H256, Index) -> BoxFuture<Option<Transaction>>;
 
-	/// Returns transaction receipt.
-	fn transaction_receipt(&self, _: Params) -> Result<Value, Error>;
+		/// Returns transaction by given block number and index.
+		#[rpc(name = "eth_getTransactionByBlockNumberAndIndex")]
+		fn transaction_by_block_number_and_index(&self, BlockNumber, Index) -> BoxFuture<Option<Transaction>>;
 
-	/// Returns an uncles at given block and index.
-	fn uncle_by_block_hash_and_index(&self, _: Params) -> Result<Value, Error>;
+		/// Returns transaction receipt by transaction hash.
+		#[rpc(name = "eth_getTransactionReceipt")]
+		fn transaction_receipt(&self, H256) -> BoxFuture<Option<Receipt>>;
 
-	/// Returns an uncles at given block and index.
-	fn uncle_by_block_number_and_index(&self, _: Params) -> Result<Value, Error>;
+		/// Returns an uncles at given block and index.
+		#[rpc(name = "eth_getUncleByBlockHashAndIndex")]
+		fn uncle_by_block_hash_and_index(&self, H256, Index) -> BoxFuture<Option<RichBlock>>;
 
-	/// Returns available compilers.
-	fn compilers(&self, _: Params) -> Result<Value, Error>;
+		/// Returns an uncles at given block and index.
+		#[rpc(name = "eth_getUncleByBlockNumberAndIndex")]
+		fn uncle_by_block_number_and_index(&self, BlockNumber, Index) -> BoxFuture<Option<RichBlock>>;
 
-	/// Compiles lll code.
-	fn compile_lll(&self, _: Params) -> Result<Value, Error>;
+		/// Returns available compilers.
+		/// @deprecated
+		#[rpc(name = "eth_getCompilers")]
+		fn compilers(&self) -> Result<Vec<String>>;
 
-	/// Compiles solidity.
-	fn compile_solidity(&self, _: Params) -> Result<Value, Error>;
+		/// Compiles lll code.
+		/// @deprecated
+		#[rpc(name = "eth_compileLLL")]
+		fn compile_lll(&self, String) -> Result<Bytes>;
 
-	/// Compiles serpent.
-	fn compile_serpent(&self, _: Params) -> Result<Value, Error>;
+		/// Compiles solidity.
+		/// @deprecated
+		#[rpc(name = "eth_compileSolidity")]
+		fn compile_solidity(&self, String) -> Result<Bytes>;
 
-	/// Returns logs matching given filter object.
-	fn logs(&self, _: Params) -> Result<Value, Error>;
+		/// Compiles serpent.
+		/// @deprecated
+		#[rpc(name = "eth_compileSerpent")]
+		fn compile_serpent(&self, String) -> Result<Bytes>;
 
-	/// Returns the hash of the current block, the seedHash, and the boundary condition to be met.
-	fn work(&self, _: Params) -> Result<Value, Error>;
+		/// Returns logs matching given filter object.
+		#[rpc(name = "eth_getLogs")]
+		fn logs(&self, Filter) -> BoxFuture<Vec<Log>>;
 
-	/// Used for submitting a proof-of-work solution.
-	fn submit_work(&self, _: Params) -> Result<Value, Error>;
+		/// Returns the hash of the current block, the seedHash, and the boundary condition to be met.
+		#[rpc(name = "eth_getWork")]
+		fn work(&self, Trailing<u64>) -> Result<Work>;
 
-	/// Used for submitting mining hashrate.
-	fn submit_hashrate(&self, _: Params) -> Result<Value, Error>;
+		/// Used for submitting a proof-of-work solution.
+		#[rpc(name = "eth_submitWork")]
+		fn submit_work(&self, H64, H256, H256) -> Result<bool>;
 
-	/// Should be used to convert object to io delegate.
-	fn to_delegate(self) -> IoDelegate<Self> {
-		let mut delegate = IoDelegate::new(Arc::new(self));
-		delegate.add_method("eth_protocolVersion", Eth::protocol_version);
-		delegate.add_method("eth_syncing", Eth::syncing);
-		delegate.add_method("eth_hashrate", Eth::hashrate);
-		delegate.add_method("eth_coinbase", Eth::author);
-		delegate.add_method("eth_mining", Eth::is_mining);
-		delegate.add_method("eth_gasPrice", Eth::gas_price);
-		delegate.add_method("eth_accounts", Eth::accounts);
-		delegate.add_method("eth_blockNumber", Eth::block_number);
-		delegate.add_method("eth_getBalance", Eth::balance);
-		delegate.add_method("eth_getStorageAt", Eth::storage_at);
-		delegate.add_method("eth_getTransactionCount", Eth::transaction_count);
-		delegate.add_method("eth_getBlockTransactionCountByHash", Eth::block_transaction_count_by_hash);
-		delegate.add_method("eth_getBlockTransactionCountByNumber", Eth::block_transaction_count_by_number);
-		delegate.add_method("eth_getUncleCountByBlockHash", Eth::block_uncles_count_by_hash);
-		delegate.add_method("eth_getUncleCountByBlockNumber", Eth::block_uncles_count_by_number);
-		delegate.add_method("eth_getCode", Eth::code_at);
-		delegate.add_method("eth_sign", Eth::sign);
-		delegate.add_method("eth_sendTransaction", Eth::send_transaction);
-		delegate.add_method("eth_sendRawTransaction", Eth::send_raw_transaction);
-		delegate.add_method("eth_call", Eth::call);
-		delegate.add_method("eth_estimateGas", Eth::estimate_gas);
-		delegate.add_method("eth_getBlockByHash", Eth::block_by_hash);
-		delegate.add_method("eth_getBlockByNumber", Eth::block_by_number);
-		delegate.add_method("eth_getTransactionByHash", Eth::transaction_by_hash);
-		delegate.add_method("eth_getTransactionByBlockHashAndIndex", Eth::transaction_by_block_hash_and_index);
-		delegate.add_method("eth_getTransactionByBlockNumberAndIndex", Eth::transaction_by_block_number_and_index);
-		delegate.add_method("eth_getTransactionReceipt", Eth::transaction_receipt);
-		delegate.add_method("eth_getUncleByBlockHashAndIndex", Eth::uncle_by_block_hash_and_index);
-		delegate.add_method("eth_getUncleByBlockNumberAndIndex", Eth::uncle_by_block_number_and_index);
-		delegate.add_method("eth_getCompilers", Eth::compilers);
-		delegate.add_method("eth_compileLLL", Eth::compile_lll);
-		delegate.add_method("eth_compileSolidity", Eth::compile_solidity);
-		delegate.add_method("eth_compileSerpent", Eth::compile_serpent);
-		delegate.add_method("eth_getLogs", Eth::logs);
-		delegate.add_method("eth_getWork", Eth::work);
-		delegate.add_method("eth_submitWork", Eth::submit_work);
-		delegate.add_method("eth_submitHashrate", Eth::submit_hashrate);
-		delegate
+		/// Used for submitting mining hashrate.
+		#[rpc(name = "eth_submitHashrate")]
+		fn submit_hashrate(&self, U256, H256) -> Result<bool>;
 	}
 }
 
-/// Eth filters rpc api (polling).
-// TODO: do filters api properly
-pub trait EthFilter: Sized + Send + Sync + 'static {
-	/// Returns id of new filter.
-	fn new_filter(&self, _: Params) -> Result<Value, Error>;
+build_rpc_trait! {
+	/// Eth filters rpc api (polling).
+	// TODO: do filters api properly
+	pub trait EthFilter {
+		/// Returns id of new filter.
+		#[rpc(name = "eth_newFilter")]
+		fn new_filter(&self, Filter) -> Result<U256>;
 
-	/// Returns id of new block filter.
-	fn new_block_filter(&self, _: Params) -> Result<Value, Error>;
+		/// Returns id of new block filter.
+		#[rpc(name = "eth_newBlockFilter")]
+		fn new_block_filter(&self) -> Result<U256>;
 
-	/// Returns id of new block filter.
-	fn new_pending_transaction_filter(&self, _: Params) -> Result<Value, Error>;
+		/// Returns id of new block filter.
+		#[rpc(name = "eth_newPendingTransactionFilter")]
+		fn new_pending_transaction_filter(&self) -> Result<U256>;
 
-	/// Returns filter changes since last poll.
-	fn filter_changes(&self, _: Params) -> Result<Value, Error>;
+		/// Returns filter changes since last poll.
+		#[rpc(name = "eth_getFilterChanges")]
+		fn filter_changes(&self, Index) -> BoxFuture<FilterChanges>;
 
-	/// Returns all logs matching given filter (in a range 'from' - 'to').
-	fn filter_logs(&self, _: Params) -> Result<Value, Error>;
+		/// Returns all logs matching given filter (in a range 'from' - 'to').
+		#[rpc(name = "eth_getFilterLogs")]
+		fn filter_logs(&self, Index) -> BoxFuture<Vec<Log>>;
 
-	/// Uninstalls filter.
-	fn uninstall_filter(&self, _: Params) -> Result<Value, Error>;
-
-	/// Should be used to convert object to io delegate.
-	fn to_delegate(self) -> IoDelegate<Self> {
-		let mut delegate = IoDelegate::new(Arc::new(self));
-		delegate.add_method("eth_newFilter", EthFilter::new_filter);
-		delegate.add_method("eth_newBlockFilter", EthFilter::new_block_filter);
-		delegate.add_method("eth_newPendingTransactionFilter", EthFilter::new_pending_transaction_filter);
-		delegate.add_method("eth_getFilterChanges", EthFilter::filter_changes);
-		delegate.add_method("eth_getFilterLogs", EthFilter::filter_logs);
-		delegate.add_method("eth_uninstallFilter", EthFilter::uninstall_filter);
-		delegate
+		/// Uninstalls filter.
+		#[rpc(name = "eth_uninstallFilter")]
+		fn uninstall_filter(&self, Index) -> Result<bool>;
 	}
 }

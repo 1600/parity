@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,154 +14,303 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-
-use std::collections::BTreeMap;
-use std::str::FromStr;
+use std::io;
 use std::sync::Arc;
-use std::net::SocketAddr;
-use ethcore::client::Client;
-use ethsync::EthSync;
-use ethminer::{Miner, ExternalMiner};
-use util::RotatingLogger;
-use util::panics::PanicHandler;
-use util::keys::store::AccountService;
-use util::network_settings::NetworkSettings;
-use die::*;
-use jsonipc;
+use std::path::PathBuf;
+use std::collections::HashSet;
 
-#[cfg(feature = "rpc")]
-pub use ethcore_rpc::Server as RpcServer;
-#[cfg(feature = "rpc")]
-use ethcore_rpc::{RpcServerError, RpcServer as Server};
-#[cfg(not(feature = "rpc"))]
-pub struct RpcServer;
+use dir::default_data_path;
+use dir::helpers::replace_home;
+use helpers::parity_ipc_path;
+use jsonrpc_core::MetaIoHandler;
+use parity_reactor::TokioRemote;
+use parity_rpc::informant::{RpcStats, Middleware};
+use parity_rpc::{self as rpc, Metadata, DomainsValidation};
+use rpc_apis::{self, ApiSet};
 
+pub use parity_rpc::{IpcServer, HttpServer, RequestMiddleware};
+pub use parity_rpc::ws::Server as WsServer;
+pub use parity_rpc::informant::CpuPool;
+
+pub const DAPPS_DOMAIN: &'static str = "web3.site";
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct HttpConfiguration {
 	pub enabled: bool,
 	pub interface: String,
 	pub port: u16,
-	pub apis: String,
-	pub cors: Vec<String>,
+	pub apis: ApiSet,
+	pub cors: Option<Vec<String>>,
+	pub hosts: Option<Vec<String>>,
+	pub server_threads: usize,
+	pub processing_threads: usize,
+	pub max_payload: usize,
 }
 
+impl Default for HttpConfiguration {
+	fn default() -> Self {
+		HttpConfiguration {
+			enabled: true,
+			interface: "127.0.0.1".into(),
+			port: 8545,
+			apis: ApiSet::UnsafeContext,
+			cors: Some(vec![]),
+			hosts: Some(vec![]),
+			server_threads: 1,
+			processing_threads: 4,
+			max_payload: 5,
+		}
+	}
+}
+
+#[derive(Debug, PartialEq)]
 pub struct IpcConfiguration {
 	pub enabled: bool,
 	pub socket_addr: String,
-	pub apis: String,
+	pub apis: ApiSet,
 }
 
-pub struct Dependencies {
-	pub panic_handler: Arc<PanicHandler>,
-	pub client: Arc<Client>,
-	pub sync: Arc<EthSync>,
-	pub secret_store: Arc<AccountService>,
-	pub miner: Arc<Miner>,
-	pub external_miner: Arc<ExternalMiner>,
-	pub logger: Arc<RotatingLogger>,
-	pub settings: Arc<NetworkSettings>,
+impl Default for IpcConfiguration {
+	fn default() -> Self {
+		IpcConfiguration {
+			enabled: true,
+			socket_addr: if cfg!(windows) {
+				r"\\.\pipe\jsonrpc.ipc".into()
+			} else {
+				let data_dir = ::dir::default_data_path();
+				parity_ipc_path(&data_dir, "$BASE/jsonrpc.ipc", 0)
+			},
+			apis: ApiSet::IpcContext,
+		}
+	}
 }
 
-pub fn new_http(conf: HttpConfiguration, deps: &Arc<Dependencies>) -> Option<RpcServer> {
-	if !conf.enabled {
+#[derive(Debug, Clone, PartialEq)]
+pub struct WsConfiguration {
+	pub enabled: bool,
+	pub interface: String,
+	pub port: u16,
+	pub apis: ApiSet,
+	pub max_connections: usize,
+	pub origins: Option<Vec<String>>,
+	pub hosts: Option<Vec<String>>,
+	pub signer_path: PathBuf,
+	pub support_token_api: bool,
+}
+
+impl Default for WsConfiguration {
+	fn default() -> Self {
+		let data_dir = default_data_path();
+		WsConfiguration {
+			enabled: true,
+			interface: "127.0.0.1".into(),
+			port: 8546,
+			apis: ApiSet::UnsafeContext,
+			max_connections: 100,
+			origins: Some(vec!["parity://*".into(),"chrome-extension://*".into(), "moz-extension://*".into()]),
+			hosts: Some(Vec::new()),
+			signer_path: replace_home(&data_dir, "$BASE/signer").into(),
+			support_token_api: true,
+		}
+	}
+}
+
+impl WsConfiguration {
+	pub fn address(&self) -> Option<rpc::Host> {
+		address(self.enabled, &self.interface, self.port, &self.hosts)
+	}
+}
+
+fn address(enabled: bool, bind_iface: &str, bind_port: u16, hosts: &Option<Vec<String>>) -> Option<rpc::Host> {
+	if !enabled {
 		return None;
 	}
 
-	let interface = match conf.interface.as_str() {
-		"all" => "0.0.0.0",
-		"local" => "127.0.0.1",
-		x => x,
+	match *hosts {
+		Some(ref hosts) if !hosts.is_empty() => Some(hosts[0].clone().into()),
+		_ => Some(format!("{}:{}", bind_iface, bind_port).into()),
+	}
+}
+
+pub struct Dependencies<D: rpc_apis::Dependencies> {
+	pub apis: Arc<D>,
+	pub remote: TokioRemote,
+	pub stats: Arc<RpcStats>,
+	pub pool: Option<CpuPool>,
+}
+
+pub fn new_ws<D: rpc_apis::Dependencies>(
+	conf: WsConfiguration,
+	deps: &Dependencies<D>,
+) -> Result<Option<WsServer>, String> {
+	if !conf.enabled {
+		return Ok(None);
+	}
+
+	let domain = DAPPS_DOMAIN;
+	let url = format!("{}:{}", conf.interface, conf.port);
+	let addr = url.parse().map_err(|_| format!("Invalid WebSockets listen host/port given: {}", url))?;
+
+	let full_handler = setup_apis(rpc_apis::ApiSet::SafeContext, deps);
+	let handler = {
+		let mut handler = MetaIoHandler::with_middleware((
+			rpc::WsDispatcher::new(full_handler),
+			Middleware::new(deps.stats.clone(), deps.apis.activity_notifier(), deps.pool.clone())
+		));
+		let apis = conf.apis.list_apis();
+		deps.apis.extend_with_set(&mut handler, &apis);
+
+		handler
 	};
-	let apis = conf.apis.split(',').collect();
-	let url = format!("{}:{}", interface, conf.port);
-	let addr = SocketAddr::from_str(&url).unwrap_or_else(|_| die!("{}: Invalid JSONRPC listen host/port given.", url));
 
-	Some(setup_http_rpc_server(deps, &addr, conf.cors, apis))
+	let remote = deps.remote.clone();
+	let allowed_origins = into_domains(with_domain(conf.origins, domain, &None));
+	let allowed_hosts = into_domains(with_domain(conf.hosts, domain, &Some(url.clone().into())));
+
+	let signer_path;
+	let path = match conf.support_token_api {
+		true => {
+			signer_path = ::signer::codes_path(&conf.signer_path);
+			Some(signer_path.as_path())
+		},
+		false => None
+	};
+	let start_result = rpc::start_ws(
+		&addr,
+		handler,
+		remote.clone(),
+		allowed_origins,
+		allowed_hosts,
+		conf.max_connections,
+		rpc::WsExtractor::new(path.clone()),
+		rpc::WsExtractor::new(path.clone()),
+		rpc::WsStats::new(deps.stats.clone()),
+	);
+
+	match start_result {
+		Ok(server) => Ok(Some(server)),
+		Err(rpc::ws::Error(rpc::ws::ErrorKind::Io(ref err), _)) if err.kind() == io::ErrorKind::AddrInUse => Err(
+			format!("WebSockets address {} is already in use, make sure that another instance of an Ethereum client is not running or change the address using the --ws-port and --ws-interface options.", url)
+		),
+		Err(e) => Err(format!("WebSockets error: {:?}", e)),
+	}
 }
 
-pub fn new_ipc(conf: IpcConfiguration, deps: &Arc<Dependencies>) -> Option<jsonipc::Server> {
-	if !conf.enabled { return None; }
-	let apis = conf.apis.split(',').collect();
-	Some(setup_ipc_rpc_server(deps, &conf.socket_addr, apis))
+pub fn new_http<D: rpc_apis::Dependencies>(
+	id: &str,
+	options: &str,
+	conf: HttpConfiguration,
+	deps: &Dependencies<D>,
+) -> Result<Option<HttpServer>, String> {
+	if !conf.enabled {
+		return Ok(None);
+	}
+
+	let domain = DAPPS_DOMAIN;
+	let url = format!("{}:{}", conf.interface, conf.port);
+	let addr = url.parse().map_err(|_| format!("Invalid {} listen host/port given: {}", id, url))?;
+	let handler = setup_apis(conf.apis, deps);
+	let remote = deps.remote.clone();
+
+	let cors_domains = into_domains(conf.cors);
+	let allowed_hosts = into_domains(with_domain(conf.hosts, domain, &Some(url.clone().into())));
+
+	let start_result = rpc::start_http(
+		&addr,
+		cors_domains,
+		allowed_hosts,
+		handler,
+		remote,
+		rpc::RpcExtractor,
+		conf.server_threads,
+		conf.max_payload,
+	);
+
+	match start_result {
+		Ok(server) => Ok(Some(server)),
+		Err(ref err) if err.kind() == io::ErrorKind::AddrInUse => Err(
+			format!("{} address {} is already in use, make sure that another instance of an Ethereum client is not running or change the address using the --{}-port and --{}-interface options.", id, url, options, options)
+		),
+		Err(e) => Err(format!("{} error: {:?}", id, e)),
+	}
 }
 
-fn setup_rpc_server(apis: Vec<&str>, deps: &Arc<Dependencies>) -> Server {
-	use ethcore_rpc::v1::*;
+pub fn new_ipc<D: rpc_apis::Dependencies>(
+	conf: IpcConfiguration,
+	dependencies: &Dependencies<D>
+) -> Result<Option<IpcServer>, String> {
+	if !conf.enabled {
+		return Ok(None);
+	}
 
-	let server = Server::new();
-	let mut modules = BTreeMap::new();
-	for api in apis.into_iter() {
-		match api {
-			"web3" => {
-				modules.insert("web3".to_owned(), "1.0".to_owned());
-				server.add_delegate(Web3Client::new().to_delegate());
-			},
-			"net" => {
-				modules.insert("net".to_owned(), "1.0".to_owned());
-				server.add_delegate(NetClient::new(&deps.sync).to_delegate());
-			},
-			"eth" => {
-				modules.insert("eth".to_owned(), "1.0".to_owned());
-				server.add_delegate(EthClient::new(&deps.client, &deps.sync, &deps.secret_store, &deps.miner, &deps.external_miner).to_delegate());
-				server.add_delegate(EthFilterClient::new(&deps.client, &deps.miner).to_delegate());
-			},
-			"personal" => {
-				modules.insert("personal".to_owned(), "1.0".to_owned());
-				server.add_delegate(PersonalClient::new(&deps.secret_store, &deps.client, &deps.miner).to_delegate())
-			},
-			"ethcore" => {
-				modules.insert("ethcore".to_owned(), "1.0".to_owned());
-				server.add_delegate(EthcoreClient::new(&deps.miner, deps.logger.clone(), deps.settings.clone()).to_delegate())
-			},
-			"traces" => {
-				modules.insert("traces".to_owned(), "1.0".to_owned());
-				server.add_delegate(TracesClient::new(&deps.client).to_delegate())
-			},
-			_ => {
-				die!("{}: Invalid API name to be enabled.", api);
-			},
+	let handler = setup_apis(conf.apis, dependencies);
+	let remote = dependencies.remote.clone();
+	let path = PathBuf::from(&conf.socket_addr);
+	// Make sure socket file can be created on unix-like OS.
+	// Windows pipe paths are not on the FS.
+	if !cfg!(windows) {
+		if let Some(dir) = path.parent() {
+			::std::fs::create_dir_all(&dir)
+				.map_err(|err| format!("Unable to create IPC directory at {}: {}", dir.display(), err))?;
 		}
 	}
-	server.add_delegate(RpcClient::new(modules).to_delegate());
-	server
-}
 
-#[cfg(not(feature = "rpc"))]
-pub fn setup_http_rpc_server(
-	_deps: Dependencies,
-	_url: &SocketAddr,
-	_cors_domain: Option<String>,
-	_apis: Vec<&str>,
-) -> ! {
-	die!("Your Parity version has been compiled without JSON-RPC support.")
-}
-
-#[cfg(feature = "rpc")]
-pub fn setup_http_rpc_server(
-	dependencies: &Arc<Dependencies>,
-	url: &SocketAddr,
-	cors_domains: Vec<String>,
-	apis: Vec<&str>,
-) -> RpcServer {
-	let server = setup_rpc_server(apis, dependencies);
-	let start_result = server.start_http(url, cors_domains);
-	let deps = dependencies.clone();
-	match start_result {
-		Err(RpcServerError::IoError(err)) => die_with_io_error("RPC", err),
-		Err(e) => die!("RPC: {:?}", e),
-		Ok(server) => {
-			server.set_panic_handler(move || {
-				deps.panic_handler.notify_all("Panic in RPC thread.".to_owned());
-			});
-			server
-		},
+	match rpc::start_ipc(&conf.socket_addr, handler, remote, rpc::RpcExtractor) {
+		Ok(server) => Ok(Some(server)),
+		Err(io_error) => Err(format!("IPC error: {}", io_error)),
 	}
 }
 
-pub fn setup_ipc_rpc_server(dependencies: &Arc<Dependencies>, addr: &str, apis: Vec<&str>) -> jsonipc::Server {
-	let server = setup_rpc_server(apis, dependencies);
-	match server.start_ipc(addr) {
-		Err(jsonipc::Error::Io(io_error)) => die_with_io_error("RPC", io_error),
-		Err(any_error) => die!("RPC: {:?}", any_error),
-		Ok(server) => server
+fn into_domains<T: From<String>>(items: Option<Vec<String>>) -> DomainsValidation<T> {
+	items.map(|vals| vals.into_iter().map(T::from).collect()).into()
+}
+
+fn with_domain(items: Option<Vec<String>>, domain: &str, dapps_address: &Option<rpc::Host>) -> Option<Vec<String>> {
+	fn extract_port(s: &str) -> Option<u16> {
+		s.split(':').nth(1).and_then(|s| s.parse().ok())
+	}
+
+	items.map(move |items| {
+		let mut items = items.into_iter().collect::<HashSet<_>>();
+		{
+			let mut add_hosts = |address: &Option<rpc::Host>| {
+				if let Some(host) = address.clone() {
+					items.insert(host.to_string());
+					items.insert(host.replace("127.0.0.1", "localhost"));
+					items.insert(format!("http://*.{}", domain)); //proxypac
+					if let Some(port) = extract_port(&*host) {
+						items.insert(format!("http://*.{}:{}", domain, port));
+					}
+				}
+			};
+
+			add_hosts(dapps_address);
+		}
+		items.into_iter().collect()
+	})
+}
+
+pub fn setup_apis<D>(apis: ApiSet, deps: &Dependencies<D>) -> MetaIoHandler<Metadata, Middleware<D::Notifier>>
+	where D: rpc_apis::Dependencies
+{
+	let mut handler = MetaIoHandler::with_middleware(
+		Middleware::new(deps.stats.clone(), deps.apis.activity_notifier(), deps.pool.clone())
+	);
+	let apis = apis.list_apis();
+	deps.apis.extend_with_set(&mut handler, &apis);
+
+	handler
+}
+
+#[cfg(test)]
+mod tests {
+	use super::address;
+
+	#[test]
+	fn should_return_proper_address() {
+		assert_eq!(address(false, "localhost", 8180, &None), None);
+		assert_eq!(address(true, "localhost", 8180, &None), Some("localhost:8180".into()));
+		assert_eq!(address(true, "localhost", 8180, &Some(vec!["host:443".into()])), Some("host:443".into()));
+		assert_eq!(address(true, "localhost", 8180, &Some(vec!["host".into()])), Some("host".into()));
 	}
 }

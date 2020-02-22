@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,10 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+//! External Miner hashrate tracker.
+
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use util::numbers::U256;
-use util::hash::H256;
+use std::sync::Arc;
+use std::time::{Instant, Duration};
+use ethereum_types::{H256, U256};
+use parking_lot::Mutex;
 
 /// External miner interface.
 pub trait ExternalMinerService: Send + Sync {
@@ -26,67 +29,69 @@ pub trait ExternalMinerService: Send + Sync {
 
 	/// Total hashrate.
 	fn hashrate(&self) -> U256;
-
-	/// Returns true if external miner is mining.
-	fn is_mining(&self) -> bool;
 }
 
 /// External Miner.
 pub struct ExternalMiner {
-	hashrates: Arc<RwLock<HashMap<H256, U256>>>,
+	hashrates: Arc<Mutex<HashMap<H256, (Instant, U256)>>>,
 }
 
 impl Default for ExternalMiner {
 	fn default() -> Self {
 		ExternalMiner {
-			hashrates: Arc::new(RwLock::new(HashMap::new())),
+			hashrates: Arc::new(Mutex::new(HashMap::new())),
 		}
 	}
 }
 
 impl ExternalMiner {
 	/// Creates new external miner with prefilled hashrates.
-	pub fn new(hashrates: Arc<RwLock<HashMap<H256, U256>>>) -> Self {
+	pub fn new(hashrates: Arc<Mutex<HashMap<H256, (Instant, U256)>>>) -> Self {
 		ExternalMiner {
-			hashrates: hashrates
+			hashrates: hashrates,
 		}
 	}
 }
 
+const ENTRY_TIMEOUT: Duration = Duration::from_secs(2);
+
 impl ExternalMinerService for ExternalMiner {
 	fn submit_hashrate(&self, hashrate: U256, id: H256) {
-		self.hashrates.write().unwrap().insert(id, hashrate);
+		self.hashrates.lock().insert(id, (Instant::now() + ENTRY_TIMEOUT, hashrate));
 	}
 
 	fn hashrate(&self) -> U256 {
-		self.hashrates.read().unwrap().iter().fold(U256::from(0), |sum, (_, v)| sum + *v)
-	}
-
-	fn is_mining(&self) -> bool {
-		!self.hashrates.read().unwrap().is_empty()
+		let mut hashrates = self.hashrates.lock();
+		let h = hashrates.drain().filter(|&(_, (t, _))| t > Instant::now()).collect();
+		*hashrates = h;
+		hashrates.iter().fold(U256::from(0), |sum, (_, &(_, v))| sum + v)
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use util::{H256, U256};
+	use std::thread::sleep;
+	use std::time::Duration;
+	use ethereum_types::{H256, U256};
 
 	fn miner() -> ExternalMiner {
 		ExternalMiner::default()
 	}
 
 	#[test]
-	fn should_return_that_is_mining_if_there_is_at_least_one_entry() {
+	fn it_should_forget_old_hashrates() {
 		// given
 		let m = miner();
-		assert_eq!(m.is_mining(), false);
+		assert_eq!(m.hashrate(), U256::from(0));
+		m.submit_hashrate(U256::from(10), H256::from(1));
+		assert_eq!(m.hashrate(), U256::from(10));
 
 		// when
-		m.submit_hashrate(U256::from(10), H256::from(1));
+		sleep(Duration::from_secs(3));
 
 		// then
-		assert_eq!(m.is_mining(), true);
+		assert_eq!(m.hashrate(), U256::from(0));
 	}
 
 	#[test]
@@ -100,7 +105,6 @@ mod tests {
 		// when
 		m.submit_hashrate(U256::from(15), H256::from(1));
 		m.submit_hashrate(U256::from(20), H256::from(2));
-
 
 		// then
 		assert_eq!(m.hashrate(), U256::from(35));

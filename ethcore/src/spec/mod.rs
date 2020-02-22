@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -18,7 +18,7 @@
 
 mod genesis;
 mod seal;
-pub mod spec;
+mod spec;
 
-pub use self::spec::*;
 pub use self::genesis::Genesis;
+pub use self::spec::{Spec, SpecHardcodedSync, SpecParams, CommonParams, OptimizeFor};

@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -17,7 +17,7 @@
 //! Blockchain configuration.
 
 /// Blockchain configuration.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Config {
 	/// Preferred cache size in bytes.
 	pub pref_cache_size: usize,
@@ -33,4 +33,3 @@ impl Default for Config {
 		}
 	}
 }
-

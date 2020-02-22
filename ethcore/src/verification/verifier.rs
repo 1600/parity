@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,13 +14,29 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use blockchain::BlockProvider;
-use engine::Engine;
+//! A generic verifier trait.
+
+use client::{BlockInfo, CallContract};
+use engines::EthEngine;
 use error::Error;
 use header::Header;
+use super::verification;
 
 /// Should be used to verify blocks.
-pub trait Verifier: Send + Sync {
-	fn verify_block_family(header: &Header, bytes: &[u8], engine: &Engine, bc: &BlockProvider) -> Result<(), Error>;
-	fn verify_block_final(expected: &Header, got: &Header) -> Result<(), Error>;
+pub trait Verifier<C>: Send + Sync
+	where C: BlockInfo + CallContract
+{
+	/// Verify a block relative to its parent and uncles.
+	fn verify_block_family(
+		&self,
+		header: &Header,
+		parent: &Header,
+		engine: &EthEngine,
+		do_full: Option<verification::FullFamilyParams<C>>
+	) -> Result<(), Error>;
+
+	/// Do a final verification check for an enacted header vs its expected counterpart.
+	fn verify_block_final(&self, expected: &Header, got: &Header) -> Result<(), Error>;
+	/// Verify a block, inspecing external state.
+	fn verify_block_external(&self, header: &Header, engine: &EthEngine) -> Result<(), Error>;
 }

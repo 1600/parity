@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use util::*;
+use ethereum_types::U256;
 
 #[inline]
 /// 1 Ether in Wei
@@ -35,4 +35,3 @@ pub fn shannon() -> U256 { U256::exp10(9) }
 #[inline]
 /// 1 Wei in Wei
 pub fn wei() -> U256 { U256::exp10(0) }
-

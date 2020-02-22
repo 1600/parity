@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -16,11 +16,4 @@
 
 //! dev-tools
 
-
-extern crate rand;
-
-pub mod random_path;
-pub mod test_socket;
-
-pub use random_path::*;
-pub use test_socket::*;
+pub mod http_client;

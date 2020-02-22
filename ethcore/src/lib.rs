@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -15,22 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 #![warn(missing_docs)]
-#![cfg_attr(feature="dev", feature(plugin))]
-#![cfg_attr(feature="dev", plugin(clippy))]
-
-// Clippy config
-// TODO [todr] not really sure
-#![cfg_attr(feature="dev", allow(needless_range_loop))]
-// Shorter than if-else
-#![cfg_attr(feature="dev", allow(match_bool))]
-// Keeps consistency (all lines with `.clone()`) and helpful when changing ref to non-ref.
-#![cfg_attr(feature="dev", allow(clone_on_copy))]
-// In most cases it expresses function flow better
-#![cfg_attr(feature="dev", allow(if_not_else))]
-// TODO [todr] a lot of warnings to be fixed
-#![cfg_attr(feature="dev", allow(needless_borrow))]
-#![cfg_attr(feature="dev", allow(assign_op_pattern))]
-
+#![cfg_attr(feature = "benches", feature(test))]
 
 //! Ethcore library
 //!
@@ -47,95 +32,156 @@
 //!
 //!   ```bash
 //!
-//!   # install multirust
-//!   curl -sf https://raw.githubusercontent.com/brson/multirust/master/blastoff.sh | sh -s -- --yes
-//!
-//!   # export rust LIBRARY_PATH
-//!   export LIBRARY_PATH=/usr/local/lib
+//!   # install rustup
+//!   curl https://sh.rustup.rs -sSf | sh
 //!
 //!   # download and build parity
-//!   git clone https://github.com/ethcore/parity
+//!   git clone https://github.com/paritytech/parity-ethereum
 //!   cd parity
-//!   multirust override beta
 //!   cargo build --release
 //!   ```
 //!
 //! - OSX:
 //!
 //!   ```bash
-//!   # install rocksdb && multirust
+//!   # install rocksdb && rustup
 //!   brew update
-//!   brew install multirust
-//!
-//!   # export rust LIBRARY_PATH
-//!   export LIBRARY_PATH=/usr/local/lib
+//!   curl https://sh.rustup.rs -sSf | sh
 //!
 //!   # download and build parity
-//!   git clone https://github.com/ethcore/parity
+//!   git clone https://github.com/paritytech/parity-ethereum
 //!   cd parity
-//!   multirust override beta
 //!   cargo build --release
 //!   ```
 
-#[macro_use] extern crate log;
-#[macro_use] extern crate ethcore_util as util;
-#[macro_use] extern crate lazy_static;
-extern crate rustc_serialize;
-#[macro_use] extern crate heapsize;
-extern crate crypto;
-extern crate time;
-extern crate env_logger;
-extern crate num_cpus;
+// Recursion limit required because of
+// error_chain foreign_links.
+#![recursion_limit="128"]
+
+extern crate blooms_db;
+extern crate bn;
+extern crate byteorder;
 extern crate crossbeam;
+extern crate common_types as types;
+extern crate ethash;
+extern crate ethcore_bloom_journal as bloom_journal;
+extern crate parity_crypto;
+extern crate ethcore_io as io;
+extern crate parity_bytes as bytes;
+extern crate ethcore_logger;
+extern crate ethcore_miner;
+#[cfg(feature = "stratum")]
+extern crate ethcore_stratum;
+extern crate ethcore_transaction as transaction;
+extern crate ethereum_types;
 extern crate ethjson;
-extern crate bloomchain;
-#[macro_use] extern crate ethcore_ipc as ipc;
+extern crate ethkey;
 
-#[cfg(test)] extern crate ethcore_devtools as devtools;
-#[cfg(feature = "jit" )] extern crate evmjit;
+extern crate hashdb;
+extern crate itertools;
+extern crate kvdb;
+extern crate kvdb_memorydb;
+extern crate kvdb_rocksdb;
+extern crate lru_cache;
+extern crate num_cpus;
+extern crate num;
+extern crate parity_machine;
+extern crate parking_lot;
+extern crate rand;
+extern crate rayon;
+extern crate rlp;
+extern crate rlp_compress;
+extern crate keccak_hash as hash;
+extern crate keccak_hasher;
+extern crate heapsize;
+extern crate memorydb;
+extern crate patricia_trie as trie;
+extern crate patricia_trie_ethereum as ethtrie;
+extern crate triehash_ethereum as triehash;
+extern crate ansi_term;
+extern crate unexpected;
+extern crate snappy;
+extern crate ethabi;
+extern crate rustc_hex;
+extern crate stats;
+extern crate stop_guard;
+extern crate using_queue;
+extern crate vm;
+extern crate wasm;
+extern crate memory_cache;
+extern crate journaldb;
+#[cfg(any(test, feature = "json-tests", feature = "test-helpers"))]
+extern crate tempdir;
 
-pub mod basic_authority;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android"))]
+extern crate hardware_wallet;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android")))]
+extern crate fake_hardware_wallet as hardware_wallet;
+
+#[macro_use]
+extern crate ethabi_derive;
+#[macro_use]
+extern crate ethabi_contract;
+#[macro_use]
+extern crate error_chain;
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate macros;
+#[macro_use]
+extern crate rlp_derive;
+#[macro_use]
+extern crate trace_time;
+
+#[cfg_attr(test, macro_use)]
+extern crate evm;
+
+pub extern crate ethstore;
+
+#[macro_use]
+pub mod views;
+
+pub mod account_provider;
 pub mod block;
-pub mod block_queue;
+pub mod builtin;
 pub mod client;
+pub mod db;
+pub mod encoded;
+pub mod engines;
 pub mod error;
 pub mod ethereum;
-pub mod filter;
+pub mod executed;
+pub mod executive;
 pub mod header;
-pub mod service;
-pub mod trace;
-pub mod spec;
-pub mod views;
+pub mod machine;
+pub mod miner;
 pub mod pod_state;
-pub mod engine;
-pub mod migrations;
+pub mod snapshot;
+pub mod spec;
+pub mod state;
+pub mod state_db;
+pub mod trace;
+pub mod verification;
 
-mod blooms;
-mod db;
-mod common;
-mod basic_types;
-#[macro_use] mod evm;
-mod env_info;
+mod cache_manager;
 mod pod_account;
-mod account_diff;
-mod state_diff;
-mod state;
-mod account;
 mod account_db;
-mod action_params;
-mod null_engine;
-mod builtin;
-mod substate;
-mod executive;
 mod externalities;
-mod verification;
 mod blockchain;
-mod types;
+mod factory;
+mod tx_filter;
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-#[cfg(feature="json-tests")]
-mod json_tests;
+#[cfg(feature = "json-tests")]
+pub mod json_tests;
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_helpers;
 
 pub use types::*;
+pub use executive::contract_address;
+pub use evm::CreateContractAddress;
+pub use blockchain::{BlockChainDB, BlockChainDBHandler};

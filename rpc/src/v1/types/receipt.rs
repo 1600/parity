@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,50 +14,122 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use util::numbers::U256;
-use util::hash::{Address, H256};
-use v1::types::Log;
-use ethcore::receipt::LocalizedReceipt;
+use v1::types::{Log, H160, H256, H2048, U256, U64};
+use ethcore::receipt::{Receipt as EthReceipt, RichReceipt, LocalizedReceipt, TransactionOutcome};
 
 /// Receipt
 #[derive(Debug, Serialize)]
 pub struct Receipt {
 	/// Transaction Hash
 	#[serde(rename="transactionHash")]
-	pub transaction_hash: H256,
+	pub transaction_hash: Option<H256>,
 	/// Transaction index
 	#[serde(rename="transactionIndex")]
-	pub transaction_index: U256,
+	pub transaction_index: Option<U256>,
 	/// Block hash
 	#[serde(rename="blockHash")]
-	pub block_hash: H256,
+	pub block_hash: Option<H256>,
+	/// Sender
+	pub from: Option<H160>,
+	/// Recipient
+	pub to: Option<H160>,
 	/// Block number
 	#[serde(rename="blockNumber")]
-	pub block_number: U256,
+	pub block_number: Option<U256>,
 	/// Cumulative gas used
 	#[serde(rename="cumulativeGasUsed")]
 	pub cumulative_gas_used: U256,
 	/// Gas used
 	#[serde(rename="gasUsed")]
-	pub gas_used: U256,
+	pub gas_used: Option<U256>,
 	/// Contract address
 	#[serde(rename="contractAddress")]
-	pub contract_address: Option<Address>,
+	pub contract_address: Option<H160>,
 	/// Logs
 	pub logs: Vec<Log>,
+	/// State Root
+	#[serde(rename="root")]
+	pub state_root: Option<H256>,
+	/// Logs bloom
+	#[serde(rename="logsBloom")]
+	pub logs_bloom: H2048,
+	/// Status code
+	#[serde(rename="status")]
+	pub status_code: Option<U64>,
+}
+
+impl Receipt {
+	fn outcome_to_state_root(outcome: TransactionOutcome) -> Option<H256> {
+		match outcome {
+			TransactionOutcome::Unknown | TransactionOutcome::StatusCode(_) => None,
+			TransactionOutcome::StateRoot(root) => Some(root.into()),
+		}
+	}
+
+	fn outcome_to_status_code(outcome: &TransactionOutcome) -> Option<U64> {
+		match *outcome {
+			TransactionOutcome::Unknown | TransactionOutcome::StateRoot(_) => None,
+			TransactionOutcome::StatusCode(ref code) => Some((*code as u64).into()),
+		}
+	}
 }
 
 impl From<LocalizedReceipt> for Receipt {
 	fn from(r: LocalizedReceipt) -> Self {
 		Receipt {
-			transaction_hash: r.transaction_hash,
-			transaction_index: U256::from(r.transaction_index),
-			block_hash: r.block_hash,
-			block_number: U256::from(r.block_number),
-			cumulative_gas_used: r.cumulative_gas_used,
-			gas_used: r.gas_used,
-			contract_address: r.contract_address,
-			logs: r.logs.into_iter().map(From::from).collect(),
+			to: r.to.map(Into::into),
+			from: Some(r.from.into()),
+			transaction_hash: Some(r.transaction_hash.into()),
+			transaction_index: Some(r.transaction_index.into()),
+			block_hash: Some(r.block_hash.into()),
+			block_number: Some(r.block_number.into()),
+			cumulative_gas_used: r.cumulative_gas_used.into(),
+			gas_used: Some(r.gas_used.into()),
+			contract_address: r.contract_address.map(Into::into),
+			logs: r.logs.into_iter().map(Into::into).collect(),
+			status_code: Self::outcome_to_status_code(&r.outcome),
+			state_root: Self::outcome_to_state_root(r.outcome),
+			logs_bloom: r.log_bloom.into(),
+		}
+	}
+}
+
+impl From<RichReceipt> for Receipt {
+	fn from(r: RichReceipt) -> Self {
+		Receipt {
+			from: None,
+			to: None,
+			transaction_hash: Some(r.transaction_hash.into()),
+			transaction_index: Some(r.transaction_index.into()),
+			block_hash: None,
+			block_number: None,
+			cumulative_gas_used: r.cumulative_gas_used.into(),
+			gas_used: Some(r.gas_used.into()),
+			contract_address: r.contract_address.map(Into::into),
+			logs: r.logs.into_iter().map(Into::into).collect(),
+			status_code: Self::outcome_to_status_code(&r.outcome),
+			state_root: Self::outcome_to_state_root(r.outcome),
+			logs_bloom: r.log_bloom.into(),
+		}
+	}
+}
+
+impl From<EthReceipt> for Receipt {
+	fn from(r: EthReceipt) -> Self {
+		Receipt {
+			from: None,
+			to: None,
+			transaction_hash: None,
+			transaction_index: None,
+			block_hash: None,
+			block_number: None,
+			cumulative_gas_used: r.gas_used.into(),
+			gas_used: None,
+			contract_address: None,
+			logs: r.logs.into_iter().map(Into::into).collect(),
+			status_code: Self::outcome_to_status_code(&r.outcome),
+			state_root: Self::outcome_to_state_root(r.outcome),
+			logs_bloom: r.log_bloom.into(),
 		}
 	}
 }
@@ -65,40 +137,44 @@ impl From<LocalizedReceipt> for Receipt {
 #[cfg(test)]
 mod tests {
 	use serde_json;
-	use std::str::FromStr;
-	use util::numbers::*;
-	use v1::types::{Bytes, Log, Receipt};
+	use v1::types::{Log, Receipt};
 
 	#[test]
 	fn receipt_serialization() {
-		let s = r#"{"transactionHash":"0x0000000000000000000000000000000000000000000000000000000000000000","transactionIndex":"0x00","blockHash":"0xed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5","blockNumber":"0x04510c","cumulativeGasUsed":"0x20","gasUsed":"0x10","contractAddress":null,"logs":[{"address":"0x33990122638b9132ca29c723bdf037f1a891a70c","topics":["0xa6697e974e6a320f454390be03f74955e8978f1a6971ea6730542e37b66179bc","0x4861736852656700000000000000000000000000000000000000000000000000"],"data":"0x","blockHash":"0xed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5","blockNumber":"0x04510c","transactionHash":"0x0000000000000000000000000000000000000000000000000000000000000000","transactionIndex":"0x00","logIndex":"0x01","type":"mined"}]}"#;
+		let s = r#"{"transactionHash":"0x0000000000000000000000000000000000000000000000000000000000000000","transactionIndex":"0x0","blockHash":"0xed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5","from":null,"to":null,"blockNumber":"0x4510c","cumulativeGasUsed":"0x20","gasUsed":"0x10","contractAddress":null,"logs":[{"address":"0x33990122638b9132ca29c723bdf037f1a891a70c","topics":["0xa6697e974e6a320f454390be03f74955e8978f1a6971ea6730542e37b66179bc","0x4861736852656700000000000000000000000000000000000000000000000000"],"data":"0x","blockHash":"0xed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5","blockNumber":"0x4510c","transactionHash":"0x0000000000000000000000000000000000000000000000000000000000000000","transactionIndex":"0x0","logIndex":"0x1","transactionLogIndex":null,"type":"mined","removed":false}],"root":"0x000000000000000000000000000000000000000000000000000000000000000a","logsBloom":"0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f","status":"0x1"}"#;
 
 		let receipt = Receipt {
-			transaction_hash: H256::zero(),
-			transaction_index: U256::zero(),
-			block_hash: H256::from_str("ed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5").unwrap(),
-			block_number: U256::from(0x4510c),
-			cumulative_gas_used: U256::from(0x20),
-			gas_used: U256::from(0x10),
+			from: None,
+			to: None,
+			transaction_hash: Some(0.into()),
+			transaction_index: Some(0.into()),
+			block_hash: Some("ed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5".parse().unwrap()),
+			block_number: Some(0x4510c.into()),
+			cumulative_gas_used: 0x20.into(),
+			gas_used: Some(0x10.into()),
 			contract_address: None,
 			logs: vec![Log {
-				address: Address::from_str("33990122638b9132ca29c723bdf037f1a891a70c").unwrap(),
+				address: "33990122638b9132ca29c723bdf037f1a891a70c".parse().unwrap(),
 				topics: vec![
-					H256::from_str("a6697e974e6a320f454390be03f74955e8978f1a6971ea6730542e37b66179bc").unwrap(),
-					H256::from_str("4861736852656700000000000000000000000000000000000000000000000000").unwrap()
+					"a6697e974e6a320f454390be03f74955e8978f1a6971ea6730542e37b66179bc".parse().unwrap(),
+					"4861736852656700000000000000000000000000000000000000000000000000".parse().unwrap(),
 				],
-				data: Bytes::new(vec![]),
-				block_hash: Some(H256::from_str("ed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5").unwrap()),
-				block_number: Some(U256::from(0x4510c)),
-				transaction_hash: Some(H256::new()),
-				transaction_index: Some(U256::zero()),
-				log_index: Some(U256::one()),
-				log_type: "mined".to_owned(),
-			}]
+				data: vec![].into(),
+				block_hash: Some("ed76641c68a1c641aee09a94b3b471f4dc0316efe5ac19cf488e2674cf8d05b5".parse().unwrap()),
+				block_number: Some(0x4510c.into()),
+				transaction_hash: Some(0.into()),
+				transaction_index: Some(0.into()),
+				transaction_log_index: None,
+				log_index: Some(1.into()),
+				log_type: "mined".into(),
+				removed: false,
+			}],
+			logs_bloom: 15.into(),
+			state_root: Some(10.into()),
+			status_code: Some(1u64.into()),
 		};
 
 		let serialized = serde_json::to_string(&receipt).unwrap();
 		assert_eq!(serialized, s);
 	}
 }
-

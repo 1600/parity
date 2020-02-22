@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -18,18 +18,20 @@
 
 mod best_block;
 mod block_info;
-pub mod blockchain;
+mod blockchain;
 mod cache;
 mod config;
-pub mod extras;
+mod extras;
 mod import_route;
 mod update;
 
 #[cfg(test)]
-mod generator;
+pub mod generator;
 
-pub use self::blockchain::{BlockProvider, BlockChain};
+pub use self::blockchain::{BlockProvider, BlockChain, BlockChainDB, BlockChainDBHandler};
 pub use self::cache::CacheSize;
 pub use self::config::Config;
-pub use types::tree_route::TreeRoute;
+pub use self::extras::{BlockReceipts, BlockDetails, TransactionAddress};
 pub use self::import_route::ImportRoute;
+pub use self::update::ExtrasInsert;
+pub use types::tree_route::TreeRoute;

@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -36,11 +36,11 @@ pub struct Transaction {
 	pub nonce: Uint,
 	/// Secret key.
 	#[serde(rename="secretKey")]
-	pub secret: H256,
+	pub secret: Option<H256>,
 	/// To.
 	pub to: MaybeEmpty<Address>,
 	/// Value.
-	pub value: Uint
+	pub value: Uint,
 }
 
 #[cfg(test)]

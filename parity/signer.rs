@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,73 +14,72 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::sync::Arc;
-use ethcore::client::Client;
-use ethsync::EthSync;
-use ethminer::{Miner, ExternalMiner};
-use util::keys::store::AccountService;
-use util::panics::{PanicHandler, ForwardPanic};
-use die::*;
+use std::io;
+use std::path::{Path, PathBuf};
 
-#[cfg(feature = "ethcore-signer")]
-use ethcore_signer as signer;
-#[cfg(feature = "ethcore-signer")]
-pub use ethcore_signer::Server as SignerServer;
-#[cfg(not(feature = "ethcore-signer"))]
-pub struct SignerServer;
+use ansi_term::Colour::White;
+use ethcore_logger::Config as LogConfig;
+use rpc;
+use rpc_apis;
+use parity_rpc;
+use path::restrict_permissions_owner;
 
-pub struct Configuration {
-	pub enabled: bool,
-	pub port: u16,
+pub const CODES_FILENAME: &'static str = "authcodes";
+
+pub struct NewToken {
+	pub token: String,
+	pub message: String,
 }
 
-pub struct Dependencies {
-	pub panic_handler: Arc<PanicHandler>,
-	pub client: Arc<Client>,
-	pub sync: Arc<EthSync>,
-	pub secret_store: Arc<AccountService>,
-	pub miner: Arc<Miner>,
-	pub external_miner: Arc<ExternalMiner>,
+pub fn new_service(ws_conf: &rpc::WsConfiguration, logger_config: &LogConfig) -> rpc_apis::SignerService {
+	let logger_config_color = logger_config.color;
+	let signer_path = ws_conf.signer_path.clone();
+	let signer_enabled = ws_conf.support_token_api;
+
+	rpc_apis::SignerService::new(move || {
+		generate_new_token(&signer_path, logger_config_color).map_err(|e| format!("{:?}", e))
+	}, signer_enabled)
 }
 
-pub fn start(conf: Configuration, deps: Dependencies) -> Option<SignerServer> {
-	if !conf.enabled {
-		None
-	} else {
-		Some(do_start(conf, deps))
-	}
+pub fn codes_path(path: &Path) -> PathBuf {
+	let mut p = path.to_owned();
+	p.push(CODES_FILENAME);
+	let _ = restrict_permissions_owner(&p, true, false);
+	p
 }
 
-#[cfg(feature = "ethcore-signer")]
-fn do_start(conf: Configuration, deps: Dependencies) -> SignerServer {
-	let addr = format!("127.0.0.1:{}", conf.port).parse().unwrap_or_else(|_| {
-		die!("Invalid port specified: {}", conf.port)
-	});
+pub fn execute(ws_conf: rpc::WsConfiguration, logger_config: LogConfig) -> Result<String, String> {
+	Ok(generate_token_and_url(&ws_conf, &logger_config)?.message)
+}
 
-	let start_result = {
-		use ethcore_rpc::v1::*;
-		let server = signer::ServerBuilder::new();
-		server.add_delegate(Web3Client::new().to_delegate());
-		server.add_delegate(NetClient::new(&deps.sync).to_delegate());
-		server.add_delegate(EthClient::new(&deps.client, &deps.sync, &deps.secret_store, &deps.miner, &deps.external_miner).to_delegate());
-		server.add_delegate(EthFilterClient::new(&deps.client, &deps.miner).to_delegate());
-		server.add_delegate(PersonalClient::new(&deps.secret_store, &deps.client, &deps.miner).to_delegate());
-		server.start(addr)
+pub fn generate_token_and_url(ws_conf: &rpc::WsConfiguration, logger_config: &LogConfig) -> Result<NewToken, String> {
+	let code = generate_new_token(&ws_conf.signer_path, logger_config.color).map_err(|err| format!("Error generating token: {:?}", err))?;
+	let colored = |s: String| match logger_config.color {
+		true => format!("{}", White.bold().paint(s)),
+		false => s,
 	};
 
-	match start_result {
-		Err(signer::ServerError::IoError(err)) => die_with_io_error("Trusted Signer", err),
-		Err(e) => die!("Trusted Signer: {:?}", e),
-		Ok(server) => {
-			deps.panic_handler.forward_from(&server);
-			server
-		},
-	}
+	Ok(NewToken {
+		token: code.clone(),
+		message: format!(
+			r#"
+Generated token:
+{}
+"#,
+			colored(code)
+		),
+	})
 }
 
-#[cfg(not(feature = "ethcore-signer"))]
-fn do_start(conf: Configuration) -> ! {
-	die!("Your Parity version has been compiled without Trusted Signer support.")
+fn generate_new_token(path: &Path, logger_config_color: bool) -> io::Result<String> {
+	let path = codes_path(path);
+	let mut codes = parity_rpc::AuthCodes::from_file(&path)?;
+	codes.clear_garbage();
+	let code = codes.generate_new()?;
+	codes.to_file(&path)?;
+	trace!("New key code created: {}", match logger_config_color {
+		true => format!("{}", White.bold().paint(&code[..])),
+		false => format!("{}", &code[..])
+	});
+	Ok(code)
 }
-
-

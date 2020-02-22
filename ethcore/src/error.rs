@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -16,73 +16,23 @@
 
 //! General error types for use in ethcore.
 
-use util::*;
+use std::{fmt, error};
+use std::time::SystemTime;
+use ethereum_types::{H256, U256, Address, Bloom};
+use snappy::InvalidInput;
+use unexpected::{Mismatch, OutOfBounds};
+use ethtrie::TrieError;
+use io::*;
 use header::BlockNumber;
-use basic_types::LogBloom;
-use client::Error as ClientError;
+use snapshot::Error as SnapshotError;
+use engines::EngineError;
+use ethkey::Error as EthkeyError;
+use account_provider::SignError as AccountsError;
+use transaction::Error as TransactionError;
 
-pub use types::executed::ExecutionError;
+pub use executed::{ExecutionError, CallError};
 
-#[derive(Debug, PartialEq)]
-/// Errors concerning transaction processing.
-pub enum TransactionError {
-	/// Transaction is already imported to the queue
-	AlreadyImported,
-	/// Transaction is not valid anymore (state already has higher nonce)
-	Old,
-	/// Transaction has too low fee
-	/// (there is already a transaction with the same sender-nonce but higher gas price)
-	TooCheapToReplace,
-	/// Transaction was not imported to the queue because limit has been reached.
-	LimitReached,
-	/// Transaction's gas price is below threshold.
-	InsufficientGasPrice {
-		/// Minimal expected gas price
-		minimal: U256,
-		/// Transaction gas price
-		got: U256,
-	},
-	/// Sender doesn't have enough funds to pay for this transaction
-	InsufficientBalance {
-		/// Senders balance
-		balance: U256,
-		/// Transaction cost
-		cost: U256,
-	},
-	/// Transactions gas is higher then current gas limit
-	GasLimitExceeded {
-		/// Current gas limit
-		limit: U256,
-		/// Declared transaction gas
-		got: U256,
-	},
-	/// Transaction's gas limit (aka gas) is invalid.
-	InvalidGasLimit(OutOfBounds<U256>),
-}
-
-impl fmt::Display for TransactionError {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		use self::TransactionError::*;
-		let msg = match *self {
-			AlreadyImported => "Already imported".into(),
-			Old => "No longer valid".into(),
-			TooCheapToReplace => "Gas price too low to replace".into(),
-			LimitReached => "Transaction limit reached".into(),
-			InsufficientGasPrice { minimal, got } =>
-				format!("Insufficient gas price. Min={}, Given={}", minimal, got),
-			InsufficientBalance { balance, cost } =>
-				format!("Insufficient balance for transaction. Balance={}, Cost={}",
-					balance, cost),
-			GasLimitExceeded { limit, got } =>
-				format!("Gas limit exceeded. Limit={}, Given={}", limit, got),
-			InvalidGasLimit(ref err) => format!("Invalid gas limit. {}", err),
-		};
-
-		f.write_fmt(format_args!("Transaction error ({})", msg))
-	}
-}
-
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Clone, Copy, Eq)]
 /// Errors concerning block processing.
 pub enum BlockError {
 	/// Block has too many uncles.
@@ -101,6 +51,8 @@ pub enum BlockError {
 	UncleIsBrother(OutOfBounds<BlockNumber>),
 	/// An uncle is already in the chain.
 	UncleInChain(H256),
+	/// An uncle is included twice.
+	DuplicateUncle(H256),
 	/// An uncle has a parent not in the chain.
 	UncleParentNotInChain(H256),
 	/// State root header field is invalid.
@@ -127,20 +79,23 @@ pub enum BlockError {
 	/// Receipts trie root header field is invalid.
 	InvalidReceiptsRoot(Mismatch<H256>),
 	/// Timestamp header field is invalid.
-	InvalidTimestamp(OutOfBounds<u64>),
+	InvalidTimestamp(OutOfBounds<SystemTime>),
+	/// Timestamp header field is too far in future.
+	TemporarilyInvalid(OutOfBounds<SystemTime>),
 	/// Log bloom header field is invalid.
-	InvalidLogBloom(Mismatch<LogBloom>),
-	/// Parent hash field of header is invalid; this is an invalid error indicating a logic flaw in the codebase.
-	/// TODO: remove and favour an assert!/panic!.
-	InvalidParentHash(Mismatch<H256>),
+	InvalidLogBloom(Mismatch<Bloom>),
 	/// Number field of header is invalid.
 	InvalidNumber(Mismatch<BlockNumber>),
 	/// Block number isn't sensible.
 	RidiculousNumber(OutOfBounds<BlockNumber>),
+	/// Too many transactions from a particular address.
+	TooManyTransactions(Address),
 	/// Parent given is unknown.
 	UnknownParent(H256),
 	/// Uncle parent given is unknown.
 	UnknownUncleParent(H256),
+	/// No transition to epoch number.
+	UnknownEpochTransition(u64),
 }
 
 impl fmt::Display for BlockError {
@@ -156,6 +111,7 @@ impl fmt::Display for BlockError {
 			UncleTooOld(ref oob) => format!("Uncle block is too old. {}", oob),
 			UncleIsBrother(ref oob) => format!("Uncle from same generation as block. {}", oob),
 			UncleInChain(ref hash) => format!("Uncle {} already in chain", hash),
+			DuplicateUncle(ref hash) => format!("Uncle {} already in the header", hash),
 			UncleParentNotInChain(ref hash) => format!("Uncle {} has a parent not in the chain", hash),
 			InvalidStateRoot(ref mis) => format!("Invalid state root in header: {}", mis),
 			InvalidGasUsed(ref mis) => format!("Invalid gas used in header: {}", mis),
@@ -167,149 +123,208 @@ impl fmt::Display for BlockError {
 			InvalidSeal => "Block has invalid seal.".into(),
 			InvalidGasLimit(ref oob) => format!("Invalid gas limit: {}", oob),
 			InvalidReceiptsRoot(ref mis) => format!("Invalid receipts trie root in header: {}", mis),
-			InvalidTimestamp(ref oob) => format!("Invalid timestamp in header: {}", oob),
+			InvalidTimestamp(ref oob) => {
+				let oob = oob.map(|st| st.elapsed().unwrap_or_default().as_secs());
+				format!("Invalid timestamp in header: {}", oob)
+			},
+			TemporarilyInvalid(ref oob) => {
+				let oob = oob.map(|st| st.elapsed().unwrap_or_default().as_secs());
+				format!("Future timestamp in header: {}", oob)
+			},
 			InvalidLogBloom(ref oob) => format!("Invalid log bloom in header: {}", oob),
-			InvalidParentHash(ref mis) => format!("Invalid parent hash: {}", mis),
 			InvalidNumber(ref mis) => format!("Invalid number in header: {}", mis),
 			RidiculousNumber(ref oob) => format!("Implausible block number. {}", oob),
 			UnknownParent(ref hash) => format!("Unknown parent: {}", hash),
 			UnknownUncleParent(ref hash) => format!("Unknown uncle parent: {}", hash),
+			UnknownEpochTransition(ref num) => format!("Unknown transition to epoch number: {}", num),
+			TooManyTransactions(ref address) => format!("Too many transactions from: {}", address),
 		};
 
 		f.write_fmt(format_args!("Block error ({})", msg))
 	}
 }
 
-#[derive(Debug, PartialEq)]
-/// Import to the block queue result
-pub enum ImportError {
-	/// Already in the block chain.
-	AlreadyInChain,
-	/// Already in the block queue.
-	AlreadyQueued,
-	/// Already marked as bad from a previous import (could mean parent is bad).
-	KnownBad,
-}
-
-impl fmt::Display for ImportError {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		let msg = match *self {
-			ImportError::AlreadyInChain => "block already in chain",
-			ImportError::AlreadyQueued => "block already in the block queue",
-			ImportError::KnownBad => "block known to be bad",
-		};
-
-		f.write_fmt(format_args!("Block import error ({})", msg))
+impl error::Error for BlockError {
+	fn description(&self) -> &str {
+		"Block error"
 	}
 }
 
-#[derive(Debug)]
-/// General error type which should be capable of representing all errors in ethcore.
-pub enum Error {
-	/// Client configuration error.
-	Client(ClientError),
-	/// Error concerning a utility.
-	Util(UtilError),
-	/// Error concerning block processing.
-	Block(BlockError),
-	/// Unknown engine given.
-	UnknownEngineName(String),
-	/// Error concerning EVM code execution.
-	Execution(ExecutionError),
-	/// Error concerning transaction processing.
-	Transaction(TransactionError),
-	/// Error concerning block import.
-	Import(ImportError),
-	/// PoW hash is invalid or out of date.
-	PowHashInvalid,
-	/// The value of the nonce or mishash is invalid.
-	PowInvalid,
+error_chain! {
+	types {
+		ImportError, ImportErrorKind, ImportErrorResultExt, ImportErrorResult;
+	}
+
+	errors {
+		#[doc = "Already in the block chain."]
+		AlreadyInChain {
+			description("Block already in chain")
+			display("Block already in chain")
+		}
+
+		#[doc = "Already in the block queue"]
+		AlreadyQueued {
+			description("block already in the block queue")
+			display("block already in the block queue")
+		}
+
+		#[doc = "Already marked as bad from a previous import (could mean parent is bad)."]
+		KnownBad {
+			description("block known to be bad")
+			display("block known to be bad")
+		}
+	}
 }
 
-impl fmt::Display for Error {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		match *self {
-			Error::Client(ref err) => f.write_fmt(format_args!("{}", err)),
-			Error::Util(ref err) => f.write_fmt(format_args!("{}", err)),
-			Error::Block(ref err) => f.write_fmt(format_args!("{}", err)),
-			Error::Execution(ref err) => f.write_fmt(format_args!("{}", err)),
-			Error::Transaction(ref err) => f.write_fmt(format_args!("{}", err)),
-			Error::Import(ref err) => f.write_fmt(format_args!("{}", err)),
-			Error::UnknownEngineName(ref name) =>
-				f.write_fmt(format_args!("Unknown engine name ({})", name)),
-			Error::PowHashInvalid => f.write_str("Invalid or out of date PoW hash."),
-			Error::PowInvalid => f.write_str("Invalid nonce or mishash"),
+error_chain! {
+	types {
+		BlockImportError, BlockImportErrorKind, BlockImportErrorResultExt;
+	}
+
+	links {
+		Import(ImportError, ImportErrorKind) #[doc = "Import error"];
+	}
+
+	foreign_links {
+		Block(BlockError) #[doc = "Block error"];
+		Decoder(::rlp::DecoderError) #[doc = "Rlp decoding error"];
+	}
+
+	errors {
+		#[doc = "Other error"]
+		Other(err: String) {
+			description("Other error")
+			display("Other error {}", err)
+		}
+	}
+}
+
+impl From<Error> for BlockImportError {
+	fn from(e: Error) -> Self {
+		match e {
+			Error(ErrorKind::Block(block_error), _) => BlockImportErrorKind::Block(block_error).into(),
+			Error(ErrorKind::Import(import_error), _) => BlockImportErrorKind::Import(import_error.into()).into(),
+			_ => BlockImportErrorKind::Other(format!("other block import error: {:?}", e)).into(),
+		}
+	}
+}
+
+/// Api-level error for transaction import
+#[derive(Debug, Clone)]
+pub enum TransactionImportError {
+	/// Transaction error
+	Transaction(TransactionError),
+	/// Other error
+	Other(String),
+}
+
+impl From<Error> for TransactionImportError {
+	fn from(e: Error) -> Self {
+		match e {
+			Error(ErrorKind::Transaction(transaction_error), _) => TransactionImportError::Transaction(transaction_error),
+			_ => TransactionImportError::Other(format!("other block import error: {:?}", e)),
+		}
+	}
+}
+
+error_chain! {
+	types {
+		Error, ErrorKind, ErrorResultExt, EthcoreResult;
+	}
+
+	links {
+		Import(ImportError, ImportErrorKind) #[doc = "Error concerning block import." ];
+	}
+
+	foreign_links {
+		Io(IoError) #[doc = "Io create error"];
+		StdIo(::std::io::Error) #[doc = "Error concerning the Rust standard library's IO subsystem."];
+		Trie(TrieError) #[doc = "Error concerning TrieDBs."];
+		Execution(ExecutionError) #[doc = "Error concerning EVM code execution."];
+		Block(BlockError) #[doc = "Error concerning block processing."];
+		Transaction(TransactionError) #[doc = "Error concerning transaction processing."];
+		Snappy(InvalidInput) #[doc = "Snappy error."];
+		Engine(EngineError) #[doc = "Consensus vote error."];
+		Ethkey(EthkeyError) #[doc = "Ethkey error."];
+	}
+
+	errors {
+		#[doc = "Snapshot error."]
+		Snapshot(err: SnapshotError) {
+			description("Snapshot error.")
+			display("Snapshot error {}", err)
+		}
+
+		#[doc = "Account Provider error"]
+		AccountProvider(err: AccountsError) {
+			description("Accounts Provider error")
+			display("Accounts Provider error {}", err)
+		}
+
+		#[doc = "PoW hash is invalid or out of date."]
+		PowHashInvalid {
+			description("PoW hash is invalid or out of date.")
+			display("PoW hash is invalid or out of date.")
+		}
+
+		#[doc = "The value of the nonce or mishash is invalid."]
+		PowInvalid {
+			description("The value of the nonce or mishash is invalid.")
+			display("The value of the nonce or mishash is invalid.")
+		}
+
+		#[doc = "Unknown engine given"]
+		UnknownEngineName(name: String) {
+			description("Unknown engine name")
+			display("Unknown engine name ({})", name)
+		}
+
+		#[doc = "RLP decoding errors"]
+		Decoder(err: ::rlp::DecoderError) {
+			description("decoding value failed")
+			display("decoding value failed with error: {}", err)
 		}
 	}
 }
 
 /// Result of import block operation.
-pub type ImportResult = Result<H256, Error>;
+pub type ImportResult = EthcoreResult<H256>;
 
-impl From<ClientError> for Error {
-	fn from(err: ClientError) -> Error {
-		Error::Client(err)
+impl From<AccountsError> for Error {
+	fn from(err: AccountsError) -> Error {
+		ErrorKind::AccountProvider(err).into()
 	}
 }
 
-impl From<TransactionError> for Error {
-	fn from(err: TransactionError) -> Error {
-		Error::Transaction(err)
+impl From<::rlp::DecoderError> for Error {
+	fn from(err: ::rlp::DecoderError) -> Error {
+		ErrorKind::Decoder(err).into()
 	}
 }
 
-impl From<ImportError> for Error {
-	fn from(err: ImportError) -> Error {
-		Error::Import(err)
-	}
-}
-
-impl From<BlockError> for Error {
-	fn from(err: BlockError) -> Error {
-		Error::Block(err)
-	}
-}
-
-impl From<ExecutionError> for Error {
-	fn from(err: ExecutionError) -> Error {
-		Error::Execution(err)
-	}
-}
-
-impl From<CryptoError> for Error {
-	fn from(err: CryptoError) -> Error {
-		Error::Util(UtilError::Crypto(err))
-	}
-}
-
-impl From<DecoderError> for Error {
-	fn from(err: DecoderError) -> Error {
-		Error::Util(UtilError::Decoder(err))
-	}
-}
-
-impl From<UtilError> for Error {
-	fn from(err: UtilError) -> Error {
-		Error::Util(err)
-	}
-}
-
-impl From<IoError> for Error {
-	fn from(err: IoError) -> Error {
-		Error::Util(From::from(err))
-	}
-}
-
-// TODO: uncomment below once https://github.com/rust-lang/rust/issues/27336 sorted.
-/*#![feature(concat_idents)]
-macro_rules! assimilate {
-    ($name:ident) => (
-		impl From<concat_idents!($name, Error)> for Error {
-			fn from(err: concat_idents!($name, Error)) -> Error {
-				Error:: $name (err)
-			}
+impl From<BlockImportError> for Error {
+	fn from(err: BlockImportError) -> Error {
+		match err {
+			BlockImportError(BlockImportErrorKind::Block(e), _) => ErrorKind::Block(e).into(),
+			BlockImportError(BlockImportErrorKind::Import(e), _) => ErrorKind::Import(e).into(),
+			_ => ErrorKind::Msg(format!("other block import error: {:?}", err)).into(),
 		}
-    )
+	}
 }
-assimilate!(FromHex);
-assimilate!(BaseData);*/
+
+impl From<SnapshotError> for Error {
+	fn from(err: SnapshotError) -> Error {
+		match err {
+			SnapshotError::Io(err) => ErrorKind::StdIo(err).into(),
+			SnapshotError::Trie(err) => ErrorKind::Trie(err).into(),
+			SnapshotError::Decoder(err) => err.into(),
+			other => ErrorKind::Snapshot(other).into(),
+		}
+	}
+}
+
+impl<E> From<Box<E>> for Error where Error: From<E> {
+	fn from(err: Box<E>) -> Error {
+		Error::from(*err)
+	}
+}

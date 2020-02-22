@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -16,8 +16,13 @@
 
 //! State of all accounts in the system expressed in Plain Old Data.
 
-use util::*;
-use pod_account::*;
+use std::fmt;
+use std::collections::BTreeMap;
+use itertools::Itertools;
+use ethereum_types::{H256, Address};
+use triehash::sec_trie_root;
+use pod_account::{self, PodAccount};
+use types::state_diff::StateDiff;
 use ethjson;
 
 /// State of all accounts in the system expressed in Plain Old Data.
@@ -29,7 +34,6 @@ impl PodState {
 	pub fn new() -> PodState { Default::default() }
 
 	/// Contruct a new object from the `m`.
-	#[cfg(test)]
 	pub fn from(m: BTreeMap<Address, PodAccount>) -> PodState { PodState(m) }
 
 	/// Get the underlying map.
@@ -37,12 +41,10 @@ impl PodState {
 
 	/// Get the root hash of the trie of the RLP of this.
 	pub fn root(&self) -> H256 {
-		sec_trie_root(self.0.iter().map(|(k, v)| (k.to_vec(), v.rlp())).collect())
+		sec_trie_root(self.0.iter().map(|(k, v)| (k, v.rlp())))
 	}
 
 	/// Drain object to get the underlying map.
-	#[cfg(test)]
-	#[cfg(feature = "json-tests")]
 	pub fn drain(self) -> BTreeMap<Address, PodAccount> { self.0 }
 }
 
@@ -66,9 +68,138 @@ impl From<ethjson::spec::State> for PodState {
 impl fmt::Display for PodState {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		for (add, acc) in &self.0 {
-			try!(writeln!(f, "{} => {}", add, acc));
+			writeln!(f, "{} => {}", add, acc)?;
 		}
 		Ok(())
 	}
 }
 
+/// Calculate and return diff between `pre` state and `post` state.
+pub fn diff_pod(pre: &PodState, post: &PodState) -> StateDiff {
+	StateDiff {
+		raw: pre.get().keys()
+			.merge(post.get().keys())
+			.filter_map(|acc| pod_account::diff_pod(pre.get().get(acc), post.get().get(acc)).map(|d| (acc.clone(), d)))
+			.collect()
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use std::collections::BTreeMap;
+	use types::state_diff::*;
+	use types::account_diff::*;
+	use pod_account::PodAccount;
+	use super::PodState;
+
+	#[test]
+	fn create_delete() {
+		let a = PodState::from(map![
+			1.into() => PodAccount {
+				balance: 69.into(),
+				nonce: 0.into(),
+				code: Some(Vec::new()),
+				storage: map![],
+			}
+		]);
+		assert_eq!(super::diff_pod(&a, &PodState::new()), StateDiff { raw: map![
+			1.into() => AccountDiff{
+				balance: Diff::Died(69.into()),
+				nonce: Diff::Died(0.into()),
+				code: Diff::Died(vec![]),
+				storage: map![],
+			}
+		]});
+		assert_eq!(super::diff_pod(&PodState::new(), &a), StateDiff{ raw: map![
+			1.into() => AccountDiff{
+				balance: Diff::Born(69.into()),
+				nonce: Diff::Born(0.into()),
+				code: Diff::Born(vec![]),
+				storage: map![],
+			}
+		]});
+	}
+
+	#[test]
+	fn create_delete_with_unchanged() {
+		let a = PodState::from(map![
+			1.into() => PodAccount {
+				balance: 69.into(),
+				nonce: 0.into(),
+				code: Some(Vec::new()),
+				storage: map![],
+			}
+		]);
+		let b = PodState::from(map![
+			1.into() => PodAccount {
+				balance: 69.into(),
+				nonce: 0.into(),
+				code: Some(Vec::new()),
+				storage: map![],
+			},
+			2.into() => PodAccount {
+				balance: 69.into(),
+				nonce: 0.into(),
+				code: Some(Vec::new()),
+				storage: map![],
+			}
+		]);
+		assert_eq!(super::diff_pod(&a, &b), StateDiff { raw: map![
+			2.into() => AccountDiff{
+				balance: Diff::Born(69.into()),
+				nonce: Diff::Born(0.into()),
+				code: Diff::Born(vec![]),
+				storage: map![],
+			}
+		]});
+		assert_eq!(super::diff_pod(&b, &a), StateDiff { raw: map![
+			2.into() => AccountDiff{
+				balance: Diff::Died(69.into()),
+				nonce: Diff::Died(0.into()),
+				code: Diff::Died(vec![]),
+				storage: map![],
+			}
+		]});
+	}
+
+	#[test]
+	fn change_with_unchanged() {
+		let a = PodState::from(map![
+			1.into() => PodAccount {
+				balance: 69.into(),
+				nonce: 0.into(),
+				code: Some(Vec::new()),
+				storage: map![],
+			},
+			2.into() => PodAccount {
+				balance: 69.into(),
+				nonce: 0.into(),
+				code: Some(Vec::new()),
+				storage: map![],
+			}
+		]);
+		let b = PodState::from(map![
+			1.into() => PodAccount {
+				balance: 69.into(),
+				nonce: 1.into(),
+				code: Some(Vec::new()),
+				storage: map![],
+			},
+			2.into() => PodAccount {
+				balance: 69.into(),
+				nonce: 0.into(),
+				code: Some(Vec::new()),
+				storage: map![],
+			}
+		]);
+		assert_eq!(super::diff_pod(&a, &b), StateDiff { raw: map![
+			1.into() => AccountDiff{
+				balance: Diff::Same,
+				nonce: Diff::Changed(0.into(), 1.into()),
+				code: Diff::Same,
+				storage: map![],
+			}
+		]});
+	}
+
+}

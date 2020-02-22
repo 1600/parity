@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -39,9 +39,8 @@ pub struct Call {
 mod tests {
 	use serde_json;
 	use vm::Call;
-	use util::numbers::U256;
+	use ethereum_types::{U256, H160 as Hash160};
 	use uint::Uint;
-	use util::hash::Address as Hash160;
 	use hash::Address;
 	use maybe::MaybeEmpty;
 	use std::str::FromStr;

@@ -1,3 +1,19 @@
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
+// This file is part of Parity.
+
+// Parity is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// Parity is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with Parity.  If not, see <http://www.gnu.org/licenses/>.
+
 //! RPC unit test moduleS
 
 pub mod helpers;
@@ -19,19 +35,8 @@ macro_rules! extract_chain {
 		::ethjson::blockchain::Test::load(RAW_DATA).unwrap().into_iter()
 	}};
 
-	($file:expr, $name:expr) => {{
-		let mut chain = None;
-		for (name, c) in extract_chain!(iter $file) {
-			if name == $name {
-				chain = Some(c);
-				break;
-			}
-		}
-		chain.unwrap()
-	}};
-
 	($file:expr) => {{
-		extract_chain!(iter $file).next().unwrap().1
+		extract_chain!(iter $file).filter(|&(_, ref t)| t.network == ForkSpec::Frontier).next().unwrap().1
 	}};
 }
 
@@ -39,27 +44,7 @@ macro_rules! register_test {
 	($name:ident, $cb:expr, $file:expr) => {
 		#[test]
 		fn $name() {
-			for (name, chain) in extract_chain!(iter $file) {
-				$cb(name, chain);
-			}
-		}
-	};
-
-	(heavy $name:ident, $cb:expr, $file:expr) => {
-		#[test]
-		#[cfg(feature = "test-heavy")]
-		fn $name() {
-			for (name, chain) in extract_chain!(iter $file) {
-				$cb(name, chain);
-			}
-		}
-	};
-
-	(ignore $name:ident, $cb:expr, $file:expr) => {
-		#[test]
-		#[ignore]
-		fn $name() {
-			for (name, chain) in extract_chain!(iter $file) {
+			for (name, chain) in extract_chain!(iter $file).filter(|&(_, ref t)| t.network == ForkSpec::Frontier) {
 				$cb(name, chain);
 			}
 		}

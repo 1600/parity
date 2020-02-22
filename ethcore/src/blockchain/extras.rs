@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -16,12 +16,17 @@
 
 //! Blockchain DB extras.
 
-use bloomchain;
-use util::*;
-use header::BlockNumber;
-use receipt::Receipt;
+use std::io::Write;
+use std::ops;
+
 use db::Key;
-use blooms::{GroupPosition, BloomGroup};
+use engines::epoch::{Transition as EpochTransition};
+use ethereum_types::{H256, H264, U256};
+use header::BlockNumber;
+use heapsize::HeapSizeOf;
+use kvdb::PREFIX_LEN as DB_PREFIX_LEN;
+use receipt::Receipt;
+use rlp;
 
 /// Represents index of extra data in database
 #[derive(Copy, Debug, Hash, Eq, PartialEq, Clone)]
@@ -32,22 +37,24 @@ pub enum ExtrasIndex {
 	BlockHash = 1,
 	/// Transaction address index
 	TransactionAddress = 2,
-	/// Block blooms index
-	BlocksBlooms = 3,
 	/// Block receipts index
 	BlockReceipts = 4,
+	/// Epoch transition data index.
+	EpochTransitions = 5,
+	/// Pending epoch transition data index.
+	PendingEpochTransition = 6,
 }
 
 fn with_index(hash: &H256, i: ExtrasIndex) -> H264 {
 	let mut result = H264::default();
 	result[0] = i as u8;
-	result.deref_mut()[1..].clone_from_slice(hash);
+	(*result)[1..].clone_from_slice(hash);
 	result
 }
 
 pub struct BlockNumberKey([u8; 5]);
 
-impl Deref for BlockNumberKey {
+impl ops::Deref for BlockNumberKey {
 	type Target = [u8];
 
 	fn deref(&self) -> &Self::Target {
@@ -77,46 +84,6 @@ impl Key<BlockDetails> for H256 {
 	}
 }
 
-pub struct LogGroupKey([u8; 6]);
-
-impl Deref for LogGroupKey {
-	type Target = [u8];
-
-	fn deref(&self) -> &Self::Target {
-		&self.0
-	}
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct LogGroupPosition(GroupPosition);
-
-impl From<bloomchain::group::GroupPosition> for LogGroupPosition {
-	fn from(position: bloomchain::group::GroupPosition) -> Self {
-		LogGroupPosition(From::from(position))
-	}
-}
-
-impl HeapSizeOf for LogGroupPosition {
-	fn heap_size_of_children(&self) -> usize {
-		self.0.heap_size_of_children()
-	}
-}
-
-impl Key<BloomGroup> for LogGroupPosition {
-	type Target = LogGroupKey;
-
-	fn key(&self) -> Self::Target {
-		let mut result = [0u8; 6];
-		result[0] = ExtrasIndex::BlocksBlooms as u8;
-		result[1] = self.0.level;
-		result[2] = (self.0.index >> 24) as u8;
-		result[3] = (self.0.index >> 16) as u8;
-		result[4] = (self.0.index >> 8) as u8;
-		result[5] = self.0.index as u8;
-		LogGroupKey(result)
-	}
-}
-
 impl Key<TransactionAddress> for H256 {
 	type Target = H264;
 
@@ -133,6 +100,45 @@ impl Key<BlockReceipts> for H256 {
 	}
 }
 
+impl Key<::engines::epoch::PendingTransition> for H256 {
+	type Target = H264;
+
+	fn key(&self) -> H264 {
+		with_index(self, ExtrasIndex::PendingEpochTransition)
+	}
+}
+
+/// length of epoch keys.
+pub const EPOCH_KEY_LEN: usize = DB_PREFIX_LEN + 16;
+
+/// epoch key prefix.
+/// used to iterate over all epoch transitions in order from genesis.
+pub const EPOCH_KEY_PREFIX: &'static [u8; DB_PREFIX_LEN] = &[
+	ExtrasIndex::EpochTransitions as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+pub struct EpochTransitionsKey([u8; EPOCH_KEY_LEN]);
+
+impl ops::Deref for EpochTransitionsKey {
+	type Target = [u8];
+
+	fn deref(&self) -> &[u8] { &self.0[..] }
+}
+
+impl Key<EpochTransitions> for u64 {
+	type Target = EpochTransitionsKey;
+
+	fn key(&self) -> Self::Target {
+		let mut arr = [0u8; EPOCH_KEY_LEN];
+		arr[..DB_PREFIX_LEN].copy_from_slice(&EPOCH_KEY_PREFIX[..]);
+
+		write!(&mut arr[DB_PREFIX_LEN..], "{:016x}", self)
+			.expect("format arg is valid; no more than 16 chars will be written; qed");
+
+		EpochTransitionsKey(arr)
+	}
+}
+
 /// Familial details concerning a block
 #[derive(Debug, Clone)]
 pub struct BlockDetails {
@@ -143,7 +149,50 @@ pub struct BlockDetails {
 	/// Parent block hash
 	pub parent: H256,
 	/// List of children block hashes
-	pub children: Vec<H256>
+	pub children: Vec<H256>,
+	/// Whether the block is considered finalized
+	pub is_finalized: bool,
+}
+
+impl rlp::Encodable for BlockDetails {
+	fn rlp_append(&self, stream: &mut rlp::RlpStream) {
+		let use_short_version = !self.is_finalized;
+
+		match use_short_version {
+			true => { stream.begin_list(4); },
+			false => { stream.begin_list(5); },
+		}
+
+		stream.append(&self.number);
+		stream.append(&self.total_difficulty);
+		stream.append(&self.parent);
+		stream.append_list(&self.children);
+		if !use_short_version {
+			stream.append(&self.is_finalized);
+		}
+	}
+}
+
+impl rlp::Decodable for BlockDetails {
+	fn decode(rlp: &rlp::Rlp) -> Result<Self, rlp::DecoderError> {
+		let use_short_version = match rlp.item_count()? {
+			4 => true,
+			5 => false,
+			_ => return Err(rlp::DecoderError::RlpIncorrectListLen),
+		};
+
+		Ok(BlockDetails {
+			number: rlp.val_at(0)?,
+			total_difficulty: rlp.val_at(1)?,
+			parent: rlp.val_at(2)?,
+			children: rlp.list_at(3)?,
+			is_finalized: if use_short_version {
+				false
+			} else {
+				rlp.val_at(4)?
+			},
+		})
+	}
 }
 
 impl HeapSizeOf for BlockDetails {
@@ -152,31 +201,8 @@ impl HeapSizeOf for BlockDetails {
 	}
 }
 
-impl Decodable for BlockDetails {
-	fn decode<D>(decoder: &D) -> Result<Self, DecoderError> where D: Decoder {
-		let d = decoder.as_rlp();
-		let details = BlockDetails {
-			number: try!(d.val_at(0)),
-			total_difficulty: try!(d.val_at(1)),
-			parent: try!(d.val_at(2)),
-			children: try!(d.val_at(3)),
-		};
-		Ok(details)
-	}
-}
-
-impl Encodable for BlockDetails {
-	fn rlp_append(&self, s: &mut RlpStream) {
-		s.begin_list(4);
-		s.append(&self.number);
-		s.append(&self.total_difficulty);
-		s.append(&self.parent);
-		s.append(&self.children);
-	}
-}
-
 /// Represents address of certain transaction within block
-#[derive(Clone)]
+#[derive(Debug, PartialEq, Clone, RlpEncodable, RlpDecodable)]
 pub struct TransactionAddress {
 	/// Block hash
 	pub block_hash: H256,
@@ -188,28 +214,8 @@ impl HeapSizeOf for TransactionAddress {
 	fn heap_size_of_children(&self) -> usize { 0 }
 }
 
-impl Decodable for TransactionAddress {
-	fn decode<D>(decoder: &D) -> Result<Self, DecoderError> where D: Decoder {
-		let d = decoder.as_rlp();
-		let tx_address = TransactionAddress {
-			block_hash: try!(d.val_at(0)),
-			index: try!(d.val_at(1)),
-		};
-
-		Ok(tx_address)
-	}
-}
-
-impl Encodable for TransactionAddress {
-	fn rlp_append(&self, s: &mut RlpStream) {
-		s.begin_list(2);
-		s.append(&self.block_hash);
-		s.append(&self.index);
-	}
-}
-
 /// Contains all block receipts.
-#[derive(Clone)]
+#[derive(Clone, RlpEncodableWrapper, RlpDecodableWrapper)]
 pub struct BlockReceipts {
 	pub receipts: Vec<Receipt>,
 }
@@ -222,22 +228,34 @@ impl BlockReceipts {
 	}
 }
 
-impl Decodable for BlockReceipts {
-	fn decode<D>(decoder: &D) -> Result<Self, DecoderError> where D: Decoder {
-		Ok(BlockReceipts {
-			receipts: try!(Decodable::decode(decoder))
-		})
-	}
-}
-
-impl Encodable for BlockReceipts {
-	fn rlp_append(&self, s: &mut RlpStream) {
-		s.append(&self.receipts);
-	}
-}
-
 impl HeapSizeOf for BlockReceipts {
 	fn heap_size_of_children(&self) -> usize {
 		self.receipts.heap_size_of_children()
+	}
+}
+
+/// Candidate transitions to an epoch with specific number.
+#[derive(Clone, RlpEncodable, RlpDecodable)]
+pub struct EpochTransitions {
+	pub number: u64,
+	pub candidates: Vec<EpochTransition>,
+}
+
+#[cfg(test)]
+mod tests {
+	use rlp::*;
+
+	use super::BlockReceipts;
+
+	#[test]
+	fn encode_block_receipts() {
+		let br = BlockReceipts::new(Vec::new());
+
+		let mut s = RlpStream::new_list(2);
+		s.append(&br);
+		assert!(!s.is_finished(), "List shouldn't finished yet");
+		s.append(&br);
+		assert!(s.is_finished(), "List should be finished now");
+		s.out();
 	}
 }

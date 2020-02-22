@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2018 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -15,49 +15,25 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Traces config.
-use bloomchain::Config as BloomConfig;
-use trace::Error;
-
-/// 3-value enum.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Switch {
-	/// True.
-	On,
-	/// False.
-	Off,
-	/// Auto.
-	Auto,
-}
-
-impl Switch {
-	/// Tries to turn old switch to new value.
-	pub fn turn_to(&self, to: Switch) -> Result<bool, Error> {
-		match (*self, to) {
-			(Switch::On, Switch::On) | (Switch::On, Switch::Auto) | (Switch::Auto, Switch::On) => Ok(true),
-			(Switch::Off, Switch::On) => Err(Error::ResyncRequired),
-			_ => Ok(false),
-		}
-	}
-}
 
 /// Traces config.
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Config {
 	/// Indicates if tracing should be enabled or not.
 	/// If it's None, it will be automatically configured.
-	pub enabled: Switch,
-	/// Traces blooms configuration.
-	pub blooms: BloomConfig,
+	pub enabled: bool,
+	/// Preferef cache-size.
+	pub pref_cache_size: usize,
+	/// Max cache-size.
+	pub max_cache_size: usize,
 }
 
 impl Default for Config {
 	fn default() -> Self {
 		Config {
-			enabled: Switch::Auto,
-			blooms: BloomConfig {
-				levels: 3,
-				elements_per_index: 16,
-			}
+			enabled: false,
+			pref_cache_size: 15 * 1024 * 1024,
+			max_cache_size: 20 * 1024 * 1024,
 		}
 	}
 }
